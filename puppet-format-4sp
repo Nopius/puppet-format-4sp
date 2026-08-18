@@ -1,0 +1,311 @@
+#!/opt/puppetlabs/puppet/bin/ruby
+# frozen_string_literal: true
+# SPDX-License-Identifier: BSD-2-Clause
+
+require 'optparse'
+require 'tempfile'
+require_relative 'formatter'
+
+options = {
+  check: false,
+  diff: false,
+  indent_width: 4,
+
+  normalize_rockets: true,
+  align_rockets_sequential: true,
+  align_rockets_by_indent: false,
+  align_rockets_oneline: false,
+
+  normalize_assignments: false,
+  align_assignments_sequential: true,
+  split_empty_resource_body: true,
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = <<~TEXT
+    Usage:
+      puppet-format-4sp [options] FILE...
+      puppet-format-4sp [options] DIRECTORY...
+
+    Examples:
+      puppet-format-4sp manifests/foo.pp
+
+      puppet-format-4sp \
+        --normalize-rockets \
+        --align-rockets-sequential \
+        manifests/
+
+      puppet-format-4sp \
+        --normalize-rockets \
+        --align-rockets-by-indent \
+        --diff \
+        manifests/
+  TEXT
+
+  opts.separator ''
+  opts.separator 'General options:'
+
+  opts.on(
+    '--check',
+    'Do not modify files; exit 1 if formatting is required'
+  ) do
+    options[:check] = true
+  end
+
+  opts.on(
+    '--diff',
+    'Print unified diff instead of modifying files'
+  ) do
+    options[:diff] = true
+  end
+
+  opts.on(
+    '--indent N',
+    Integer,
+    'Indent width (default: 4)'
+  ) do |width|
+    if width <= 0
+      warn '--indent must be greater than zero'
+      exit 2
+    end
+
+    options[:indent_width] = width
+  end
+
+  opts.separator ''
+  opts.separator 'Hash rocket (=>) options:'
+
+  opts.on(
+    '--[no-]normalize-rockets',
+    'Normalize => to one space on each side',
+    '(default: enabled)'
+  ) do |value|
+    options[:normalize_rockets] = value
+  end
+
+  opts.on(
+    '--[no-]align-rockets-sequential',
+    'Align => operators in consecutive same-indent entries',
+    '(default: enabled'
+  ) do |value|
+    options[:align_rockets_sequential] = value
+  end
+
+  opts.on(
+    '--[no-]align-rockets-by-indent',
+    'Align => operators in the same structural block/indent level',
+    '(default: disabled)'
+  ) do |value|
+    options[:align_rockets_by_indent] = value
+  end
+
+  opts.separator ''
+  opts.separator 'Assignment (=) options:'
+
+  opts.on(
+    '--[no-]normalize-assignments',
+    'Normalize variable assignment = to one space on each side',
+    '(default: disabled)'
+  ) do |value|
+    options[:normalize_assignments] = value
+  end
+
+  opts.on(
+    '--[no-]align-assignments-sequential',
+    'Align = for consecutive variable assignments',
+    '(default: disabled)'
+  ) do |value|
+    options[:align_assignments_sequential] = value
+  end
+
+  opts.on(
+    '--[no-]align-rockets-oneline',
+    'Allow => alignment inside one-line {...} expressions',
+    '(default: disabled)'
+  ) do |value|
+    options[:align_rockets_oneline] = value
+  end
+
+  opts.on(
+    '--[no-]split-empty-resource-body',
+    'Put empty resource terminator ; on its own line'
+  ) do |value|
+    options[:split_empty_resource_body] = value
+  end
+
+  opts.separator ''
+  opts.separator 'Other options:'
+
+  opts.on(
+    '-h',
+    '--help',
+    'Show this help'
+  ) do
+    puts opts
+    exit 0
+  end
+end
+
+begin
+  parser.parse!
+rescue OptionParser::ParseError => e
+  warn e.message
+  warn
+  warn parser
+  exit 2
+end
+
+if ARGV.empty?
+  warn 'No input files or directories specified.'
+  warn
+  warn parser
+  exit 2
+end
+
+def collect_files(paths)
+  paths.flat_map do |path|
+    if File.directory?(path)
+      Dir.glob(
+        File.join(path, '**', '*.pp')
+      )
+    elsif File.file?(path) && path.end_with?('.pp')
+      path
+    else
+      warn "Ignoring #{path}: not a Puppet .pp file or directory"
+      []
+    end
+  end.uniq.sort
+end
+
+def read_manifest(path)
+  content = File.open(path, 'r:UTF-8', &:read)
+
+  unless content.valid_encoding?
+    raise PuppetFormat4sp::FormatError,
+          "#{path}: file is not valid UTF-8"
+  end
+
+  content
+rescue Encoding::InvalidByteSequenceError,
+       Encoding::UndefinedConversionError => e
+  raise PuppetFormat4sp::FormatError,
+        "#{path}: invalid UTF-8: #{e.message}"
+end
+
+def unified_diff(path, before, after)
+  Tempfile.create('puppet-format-before') do |old_file|
+    Tempfile.create('puppet-format-after') do |new_file|
+      old_file.binmode
+      new_file.binmode
+
+      old_file.write(before)
+      new_file.write(after)
+
+      old_file.flush
+      new_file.flush
+
+      system(
+        'diff',
+        '-u',
+        '--label',
+        "#{path} (original)",
+        '--label',
+        "#{path} (formatted)",
+        old_file.path,
+        new_file.path
+      )
+    end
+  end
+end
+
+def atomic_write(path, content)
+  directory = File.dirname(path)
+  basename = File.basename(path)
+
+  original_stat = File.stat(path)
+
+  Tempfile.create(
+    [".#{basename}", '.tmp'],
+    directory
+  ) do |tmp|
+    tmp.binmode
+    tmp.write(content)
+    tmp.flush
+    tmp.fsync
+
+    File.chmod(
+      original_stat.mode,
+      tmp.path
+    )
+
+    File.rename(
+      tmp.path,
+      path
+    )
+  end
+end
+
+files = collect_files(ARGV)
+
+if files.empty?
+  warn 'No .pp files found.'
+  exit 2
+end
+
+changed = false
+errors = false
+
+files.each do |path|
+  begin
+    original = read_manifest(path)
+
+    formatter = PuppetFormat4sp::Formatter.new(
+      original,
+      filename: path,
+      indent_width: options[:indent_width],
+
+      normalize_rockets: options[:normalize_rockets],
+      align_rockets_sequential: options[:align_rockets_sequential],
+      align_rockets_by_indent: options[:align_rockets_by_indent],
+      align_rockets_oneline: options[:align_rockets_oneline],
+
+      normalize_assignments: options[:normalize_assignments],
+      align_assignments_sequential: options[:align_assignments_sequential],
+      split_empty_resource_body: options[:split_empty_resource_body]
+    )
+    formatted = formatter.format
+
+    next if original == formatted
+
+    changed = true
+
+    if options[:diff]
+      unified_diff(
+        path,
+        original,
+        formatted
+      )
+    elsif options[:check]
+      puts "#{path}: needs formatting"
+    else
+      atomic_write(
+        path,
+        formatted
+      )
+
+      puts "#{path}: formatted"
+    end
+  rescue PuppetFormat4sp::FormatError => e
+    warn e.message
+    errors = true
+  rescue StandardError => e
+    warn "#{path}: unexpected error: #{e.class}: #{e.message}"
+    errors = true
+  end
+end
+
+exit 2 if errors
+exit 1 if changed && options[:check]
+
+exit 0
+
