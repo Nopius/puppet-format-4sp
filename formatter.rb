@@ -2,6 +2,7 @@
 
 require 'open3'
 
+
 # we should will internal 'ruby' puppet gem and system wide installed gem 'puppet-lint'
 def system_gem_lib(name)
   ruby = '/usr/bin/ruby'
@@ -67,6 +68,18 @@ module PuppetFormat4sp
       OUT_EDGE_SUB
     ].freeze
 
+
+    RELATIONSHIP_WHITESPACE = %i[
+      WHITESPACE
+      INDENT
+      NEWLINE
+    ].freeze
+
+    RESOURCE_REFERENCE_TYPES = %i[
+      TYPE
+      CLASSREF
+    ].freeze
+
     def initialize(
       source,
       filename: '(string)',
@@ -77,7 +90,9 @@ module PuppetFormat4sp
       align_rockets_oneline: false,
       normalize_assignments: false,
       align_assignments_sequential: false,
-      split_empty_resource_body: true
+      split_empty_resource_body: true,
+      normalize_relationships: true,
+      indent_reference_relationships: true
     )
       @source = source
       @filename = filename
@@ -89,6 +104,8 @@ module PuppetFormat4sp
       @normalize_assignments = normalize_assignments
       @align_assignments_sequential = align_assignments_sequential
       @split_empty_resource_body = split_empty_resource_body
+      @normalize_relationships = normalize_relationships
+     @indent_reference_relationships = indent_reference_relationships
     end
 
     def format
@@ -103,6 +120,19 @@ module PuppetFormat4sp
 
       tokens = lex(source)
 
+      if @normalize_relationships
+#        tokens.each do |token|
+#          puts "#{token.type} line=#{token.line} value=#{token.value.inspect}"
+#        end
+
+        source = normalize_relationship_layout(
+          source,
+          tokens
+        )
+
+      end
+
+      tokens = lex(source)
 
       structural_depths = calculate_structural_depths(tokens)
       resource_extra_depths =
@@ -144,16 +174,24 @@ module PuppetFormat4sp
         )
       end
 
-      if normalize_assignments
+      if @normalize_assignments
+        tokens = lex(result)
+        protected_lines = calculate_protected_lines(tokens)
+      
         result = normalize_assignment_spacing(
           result,
+          tokens,
           protected_lines
         )
       end
-
-      if align_assignments_sequential
+      
+      if @align_assignments_sequential
+        tokens = lex(result)
+        protected_lines = calculate_protected_lines(tokens)
+      
         result = align_assignments_sequential_pass(
           result,
+          tokens,
           protected_lines
         )
       end
@@ -193,19 +231,12 @@ module PuppetFormat4sp
     def lex(text)
       lexer = PuppetLint::Lexer.new
       lexer.tokenise(text)
-    rescue StandardError => e
-      raise FormatError,
-            "#{@filename}: puppet-lint lexer error: #{e.message}"
     end
 
     def validate!(text)
       parser = Puppet::Pops::Parser::EvaluatingParser.new
       parser.parse_string(text, @filename)
-
       true
-    rescue StandardError => e
-      raise FormatError,
-            "#{@filename}: Puppet parse error: #{e.message}"
     end
 
     def significant_tokens(tokens)
@@ -215,7 +246,119 @@ module PuppetFormat4sp
       end
     end
 
-  
+    def relationship_whitespace_before(tokens, index)
+      trivia = []
+
+      i = index - 1
+
+      while i >= 0 && RELATIONSHIP_WHITESPACE.include?(tokens[i].type)
+        trivia.unshift(tokens[i])
+        i -= 1
+      end
+
+      trivia
+    end
+
+    def only_layout_whitespace_between?(tokens, left_index, right_index)
+      return false if right_index <= left_index
+
+      tokens[(left_index + 1)...right_index].all? do |token|
+        RELATIONSHIP_WHITESPACE.include?(token.type)
+      end
+    end
+
+    def normalize_relationship_before_target!(
+      edits,
+      tokens,
+      relationship_index,
+      target_index,
+      line_offsets
+    )
+      relationship_token = tokens[relationship_index]
+      target_token = tokens[target_index]
+    
+      return unless only_layout_whitespace_between?(
+        tokens,
+        relationship_index,
+        target_index
+      )
+    
+      relationship_offset =
+        token_offset(relationship_token, line_offsets)
+    
+      target_offset =
+        token_offset(target_token, line_offsets)
+    
+      relationship_end =
+        relationship_offset +
+        token_source(relationship_token).bytesize
+    
+      edits << [
+        relationship_end,
+        target_offset,
+        ' ',
+      ]
+    end
+
+
+    def normalize_relationship_after_previous!(
+      edits,
+      text,
+      tokens,
+      relationship_index,
+      line_offsets
+    )
+      relationship_token = tokens[relationship_index]
+    
+      whitespace =
+        relationship_whitespace_before(tokens, relationship_index)
+    
+      relationship_offset =
+        token_offset(relationship_token, line_offsets)
+    
+      if whitespace.empty?
+        #
+        # No whitespace:
+        #
+        #   }->
+        #
+        # Insert newline immediately before ->.
+        #
+        edits << [
+          relationship_offset,
+          relationship_offset,
+          "\n",
+        ]
+    
+        return
+      end
+    
+      first_whitespace = whitespace.first
+    
+      start_offset =
+        token_offset(first_whitespace, line_offsets)
+    
+      edits << [
+        start_offset,
+        relationship_offset,
+        "\n",
+      ]
+    end
+
+
+    def relationship_target_is_resource_reference?(sig, relationship_index)
+      target = sig[relationship_index + 1]
+      next_token = sig[relationship_index + 2]
+    
+      return false unless target
+      return false unless next_token
+      return false unless next_token.type == :LBRACK
+    
+      RESOURCE_REFERENCE_TYPES.include?(target.type)
+      # source = token_source(target)
+      # source.match?(/\A[A-Z][A-Za-z0-9_:]*\z/)
+    end
+      
     def resource_title_colon?(tokens, index, stack)
       token = tokens[index]
     
@@ -935,24 +1078,34 @@ module PuppetFormat4sp
     #
     # Resource relationships
     #
+    def resource_reference_start?(tokens, index)
+      target = tokens[index]
+      bracket = tokens[index + 1]
+    
+      return false unless target
+      return false unless bracket
+    
+      return false unless RESOURCE_REFERENCE_TYPES.include?(target.type)
+      return false unless bracket.type == :LBRACK
+    
+      true
+    end
 
     def calculate_relationship_lines(tokens)
       relationship_lines = {}
-
-      tokens.each do |token|
-        if RELATIONSHIP_TYPES.include?(token.type)
-          relationship_lines[token.line] = true
-        end
+    
+      sig = significant_tokens(tokens)
+    
+      sig.each_with_index do |token, index|
+        next unless RELATIONSHIP_TYPES.include?(token.type)
+    
+        target = sig[index + 1]
+    
+        relationship_lines[token.line] = {
+          target_reference: resource_reference_start?(sig, index + 1),
+        }
       end
-
-      source.lines.each_with_index do |line, index|
-        stripped = line.lstrip
-
-        if stripped.start_with?('->', '~>')
-          relationship_lines[index + 1] = true
-        end
-      end
-
+    
       relationship_lines
     end
 
@@ -999,7 +1152,18 @@ module PuppetFormat4sp
         line_number,
         relationship_lines
       )
-        return line
+        depth = depths[line_number]
+        return line if depth.nil?
+
+        if @indent_reference_relationships &&
+           relationship_lines[line_number]&.dig(:target_reference)
+          depth += 1
+        end
+
+        return replace_leading_whitespace(
+          line,
+          depth
+        )        
       end
     
       depth = depths[line_number]
@@ -1082,6 +1246,134 @@ module PuppetFormat4sp
         .min_by { |line, _depth| line }
 
       candidate&.last
+    end
+
+
+    def previous_non_layout_token_index(tokens, index)
+      i = index - 1
+    
+      while i >= 0 && RELATIONSHIP_WHITESPACE.include?(tokens[i].type)
+        i -= 1
+      end
+    
+      i >= 0 ? i : nil
+    end
+    def next_non_layout_token_index(tokens, index)
+      i = index + 1
+    
+      while i < tokens.length &&
+            RELATIONSHIP_WHITESPACE.include?(tokens[i].type)
+        i += 1
+      end
+    
+      i < tokens.length ? i : nil
+    end
+  
+    #
+    #
+    # We want:
+    #
+    #     }
+    #     -> file {
+    #
+    # rather than:
+    #
+    #     } ->
+    #     file {
+    #
+    # or:
+    #
+    #     }
+    #     ->
+    #     file {
+    #
+    def relationship_token?(token)
+      RELATIONSHIP_TYPES.include?(token.type)
+    end
+
+    def normalize_relationship_layout(text, tokens)
+      line_offsets = line_start_offsets(text)
+      edits = []
+    
+      tokens.each_with_index do |token, index|
+        next unless relationship_token?(token)
+    
+        previous_index = previous_non_layout_token_index(tokens, index)
+        target_index   = next_non_layout_token_index(tokens, index)
+    
+        next unless previous_index
+        next unless target_index
+    
+        normalize_relationship_after_previous!(
+          edits,
+          tokens,
+          index,
+          previous_index,
+          line_offsets
+        )
+    
+        normalize_relationship_before_target!(
+          edits,
+          tokens,
+          index,
+          target_index,
+          line_offsets
+        )
+      end
+    
+      apply_source_edits(text, edits)
+    end
+
+
+    def normalize_relationship_after_previous!(
+      edits,
+      tokens,
+      relationship_index,
+      previous_index,
+      line_offsets
+    )
+      relationship_token = tokens[relationship_index]
+    
+      relationship_offset =
+        token_offset(relationship_token, line_offsets)
+    
+      first_layout_index = previous_index + 1
+    
+      if first_layout_index == relationship_index
+        #
+        # No whitespace at all:
+        #
+        #   }->
+        #
+        # Insert newline before the relationship operator.
+        #
+        edits << [
+          relationship_offset,
+          relationship_offset,
+          "\n",
+        ]
+    
+        return
+      end
+    
+      #
+      # Everything between previous token and relationship token
+      # must be layout whitespace only.
+      #
+      return unless tokens[first_layout_index...relationship_index].all? do |token|
+        RELATIONSHIP_WHITESPACE.include?(token.type)
+      end
+    
+      first_layout_token = tokens[first_layout_index]
+    
+      start_offset =
+        token_offset(first_layout_token, line_offsets)
+    
+      edits << [
+        start_offset,
+        relationship_offset,
+        "\n",
+      ]
     end
 
     #
@@ -1414,25 +1706,27 @@ module PuppetFormat4sp
     #
     # Does not touch ==, =~, !=, <=, >=, etc.
     #
-    def normalize_assignment_spacing(
-      text,
-      protected_lines
-    )
-      lines = text.lines
-
-      lines.each_with_index.map do |line, index|
+    def normalize_assignment_spacing(text, tokens, protected_lines)
+      tokens_by_line = tokens.group_by(&:line)
+    
+      text.lines.each_with_index.map do |line, index|
         line_number = index + 1
-
+    
         next line if protected_lines[line_number]
-
-        parsed = split_assignment_line(line)
-        next line unless parsed
-
-        parsed[:indent] +
-          parsed[:left] +
-          ' = ' +
-          parsed[:right] +
-          parsed[:newline]
+    
+        line_tokens = tokens_by_line.fetch(
+          line_number,
+          []
+        )
+    
+        split = split_assignment_line(
+          line,
+          line_tokens
+        )
+    
+        next line unless split
+    
+        # ...
       end.join
     end
 
@@ -1442,19 +1736,23 @@ module PuppetFormat4sp
     # Only consecutive variable assignment lines.
     #
     def align_assignments_sequential_pass(
-      text,
+      text, 
+      tokens,
       protected_lines
     )
+      tokens_by_line = tokens.group_by(&:line)
       lines = text.lines
       groups = []
       current = []
 
       lines.each_with_index do |line, index|
         line_number = index + 1
+        line_tokens = tokens_by_line.fetch(line_number, [])
+
 
         parsed =
           unless protected_lines[line_number]
-            split_assignment_line(line)
+            split_assignment_line(line, line_tokens)
           end
 
         if parsed
@@ -1521,25 +1819,31 @@ module PuppetFormat4sp
       end
     end
 
-    def split_assignment_line(line)
-      newline = newline_for(line)
-      body = line.sub(/\r?\n\z/, '')
-
-      indent = body[/\A[ \t]*/]
-      content = body[indent.length..]
-
-      match = content.match(
-        /\A(\$[A-Za-z_][A-Za-z0-9_:]*)\s*=(?!=|~)\s*(.*)\z/
-      )
-
-      return nil unless match
-
-      {
-        indent: indent,
-        left: match[1],
-        right: match[2],
-        newline: newline,
-      }
+    def split_assignment_line(line, line_tokens)
+      sig = significant_tokens(line_tokens)
+    
+      return nil if sig.length < 3
+      return nil unless sig[0].type == :VARIABLE
+      return nil unless sig[1].type == :EQUALS
+    
+      equals_offset = sig[1].column - 1
+    
+      original_encoding = line.encoding
+      binary = line.dup.force_encoding(Encoding::BINARY)
+    
+      lhs = binary.byteslice(0, equals_offset).to_s
+      rhs = binary.byteslice(equals_offset + 1..).to_s
+    
+      lhs.force_encoding(original_encoding)
+      rhs.force_encoding(original_encoding)
+    
+      lhs = lhs.rstrip
+      rhs = rhs.sub(/\r?\n\z/, '').lstrip
+    
+      return nil if lhs.empty?
+      return nil if rhs.empty?
+    
+      [lhs, rhs]
     end
 
     #

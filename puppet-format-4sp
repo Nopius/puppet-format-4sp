@@ -1,4 +1,4 @@
-#!/opt/puppetlabs/puppet/bin/ruby
+#!/usr/bin/ruby
 # frozen_string_literal: true
 # SPDX-License-Identifier: BSD-2-Clause
 
@@ -19,6 +19,9 @@ options = {
   normalize_assignments: false,
   align_assignments_sequential: true,
   split_empty_resource_body: true,
+
+  normalize_relationships: true,
+  indent_reference_relationships: true,
 }
 
 parser = OptionParser.new do |opts|
@@ -132,6 +135,21 @@ parser = OptionParser.new do |opts|
   ) do |value|
     options[:split_empty_resource_body] = value
   end
+
+  opts.on(
+  '--[no-]normalize-relationships',
+  'Normalize -> and ~> relationship layout'
+) do |value|
+  options[:normalize_relationships] = value
+end
+
+opts.on(
+  '--[no-]indent-reference-relationships',
+  'Indent relationship lines targeting resource references'
+) do |value|
+  options[:indent_reference_relationships] = value
+end
+
 
   opts.separator ''
   opts.separator 'Other options:'
@@ -271,7 +289,10 @@ files.each do |path|
 
       normalize_assignments: options[:normalize_assignments],
       align_assignments_sequential: options[:align_assignments_sequential],
-      split_empty_resource_body: options[:split_empty_resource_body]
+      split_empty_resource_body: options[:split_empty_resource_body],
+
+      normalize_relationships: options[:normalize_relationships],
+      indent_reference_relationships: options[:indent_reference_relationships]
     )
     formatted = formatter.format
 
