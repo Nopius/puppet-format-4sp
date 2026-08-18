@@ -918,7 +918,7 @@ sed -n '1,120p' manifest.pp | cat -A
 
 # License
 
-AAdd the license used by your repository here.Add the license used by your repository here.dd the license used by ymt-4sp` is distributed under the BSD 2-Clause License.
+`puppet-format-4sp` is distributed under the BSD 2-Clause License.
 
 See [LICENSE](LICENSE) for the full license text.
 
