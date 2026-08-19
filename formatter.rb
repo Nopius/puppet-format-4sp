@@ -117,6 +117,11 @@ module PuppetFormat4sp
       OUT_EDGE_SUB
     ].freeze
 
+    RESOURCE_REFERENCE_TYPES = %i[
+      TYPE
+      CLASSREF
+    ].freeze
+
     HASH_ROCKET_TYPE = :FARROW
     ASSIGNMENT_TYPE = :EQUALS
 
@@ -130,7 +135,9 @@ module PuppetFormat4sp
       align_rockets_oneline: false,
       normalize_assignments: false,
       align_assignments_sequential: false,
-      split_empty_resource_body: true
+      split_empty_resource_body: true,
+      normalize_relationships: true,
+      indent_reference_relationships: true
     )
       raise ArgumentError, 'indent_width must be greater than zero' unless indent_width.positive?
 
@@ -144,6 +151,8 @@ module PuppetFormat4sp
       @normalize_assignments = normalize_assignments
       @align_assignments_sequential = align_assignments_sequential
       @split_empty_resource_body = split_empty_resource_body
+      @normalize_relationships = normalize_relationships
+      @indent_reference_relationships = indent_reference_relationships
     end
 
     def format
@@ -154,6 +163,11 @@ module PuppetFormat4sp
 
       current = normalize_resource_layout(current, tokens)
       tokens = lex(current)
+
+      if @normalize_relationships
+        current = normalize_relationship_layout(current, tokens)
+        tokens = lex(current)
+      end
 
       structural_depths = calculate_structural_depths(tokens)
       resource_extra_depths = calculate_resource_extra_depths(tokens)
@@ -343,6 +357,110 @@ module PuppetFormat4sp
 
     def preferred_newline(text)
       text.include?("\r\n") ? "\r\n" : "\n"
+    end
+
+    # Relationship layout
+
+    def relationship_token?(token)
+      RELATIONSHIP_TYPES.include?(token.type)
+    end
+
+    def previous_non_layout_token_index(tokens, index)
+      candidate = index - 1
+      candidate -= 1 while candidate >= 0 && LAYOUT_WHITESPACE_TYPES.include?(tokens[candidate].type)
+      candidate >= 0 ? candidate : nil
+    end
+
+    def next_non_layout_token_index(tokens, index)
+      candidate = index + 1
+      candidate += 1 while candidate < tokens.length &&
+                           LAYOUT_WHITESPACE_TYPES.include?(tokens[candidate].type)
+      candidate < tokens.length ? candidate : nil
+    end
+
+    def layout_token_range?(tokens, first_index, last_index)
+      tokens[first_index...last_index].all? do |token|
+        LAYOUT_WHITESPACE_TYPES.include?(token.type)
+      end
+    end
+
+    def normalize_relationship_layout(text, tokens)
+      line_offsets = line_start_offsets(text)
+      newline = preferred_newline(text)
+      edits = []
+
+      tokens.each_with_index do |token, index|
+        next unless relationship_token?(token)
+
+        previous_index = previous_non_layout_token_index(tokens, index)
+        target_index = next_non_layout_token_index(tokens, index)
+        next unless previous_index && target_index
+
+        previous = tokens[previous_index]
+        target = tokens[target_index]
+
+        # Comments are layout boundaries, not whitespace to rewrite.
+        next if COMMENT_TYPES.include?(previous.type) || COMMENT_TYPES.include?(target.type)
+
+        normalize_relationship_after_previous!(
+          edits,
+          tokens,
+          index,
+          previous_index,
+          line_offsets,
+          newline
+        )
+        normalize_relationship_before_target!(
+          edits,
+          tokens,
+          index,
+          target_index,
+          line_offsets
+        )
+      end
+
+      apply_source_edits(text, edits)
+    end
+
+    def normalize_relationship_after_previous!(
+      edits,
+      tokens,
+      relationship_index,
+      previous_index,
+      line_offsets,
+      newline
+    )
+      relationship = tokens[relationship_index]
+      relationship_offset = token_offset(relationship, line_offsets)
+      first_layout_index = previous_index + 1
+
+      if first_layout_index == relationship_index
+        edits << [relationship_offset, relationship_offset, newline]
+        return
+      end
+
+      return unless layout_token_range?(tokens, first_layout_index, relationship_index)
+
+      start_offset = token_offset(tokens[first_layout_index], line_offsets)
+      edits << [start_offset, relationship_offset, newline]
+    end
+
+    def normalize_relationship_before_target!(
+      edits,
+      tokens,
+      relationship_index,
+      target_index,
+      line_offsets
+    )
+      first_layout_index = relationship_index + 1
+      return unless layout_token_range?(tokens, first_layout_index, target_index)
+
+      relationship = tokens[relationship_index]
+      relationship_end =
+        token_offset(relationship, line_offsets) + token_width(relationship)
+      target_offset = token_offset(tokens[target_index], line_offsets)
+
+      edits << [relationship_end, target_offset, ' ']
     end
 
     # Resource layout
@@ -694,16 +812,32 @@ module PuppetFormat4sp
 
     # Relationship lines
 
+    def resource_reference_start?(tokens, index)
+      target = tokens[index]
+      bracket = tokens[index + 1]
+
+      target &&
+        bracket &&
+        RESOURCE_REFERENCE_TYPES.include?(target.type) &&
+        bracket.type == :LBRACK
+    end
+
     def calculate_relationship_lines(tokens)
       relationships = {}
+      significant = significant_tokens(tokens)
+      first_by_line = {}
 
-      tokens_by_line(tokens).each do |line_number, line_tokens|
-        first = line_tokens.find do |token|
-          !LAYOUT_WHITESPACE_TYPES.include?(token.type) &&
-            !COMMENT_TYPES.include?(token.type)
-        end
+      significant.each do |token|
+        first_by_line[token.line] ||= token
+      end
 
-        relationships[line_number] = true if first && RELATIONSHIP_TYPES.include?(first.type)
+      significant.each_with_index do |token, index|
+        next unless relationship_token?(token)
+        next unless first_by_line[token.line].equal?(token)
+
+        relationships[token.line] = {
+          target_reference: resource_reference_start?(significant, index + 1),
+        }
       end
 
       relationships
@@ -728,7 +862,17 @@ module PuppetFormat4sp
 
         next line if protected_lines[line_number]
         next line if line.strip.empty?
-        next line if relationship_lines[line_number]
+
+        if (relationship = relationship_lines[line_number])
+          depth = structural_depths[line_number]
+          next line if depth.nil?
+
+          if @indent_reference_relationships && relationship[:target_reference]
+            depth += 1
+          end
+
+          next replace_leading_whitespace(line, depth)
+        end
 
         depth = effective_depths[line_number] || comment_depths[line_number]
         next line if depth.nil?
