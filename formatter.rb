@@ -171,6 +171,7 @@ module PuppetFormat4sp
 
       structural_depths = calculate_structural_depths(tokens)
       resource_extra_depths = calculate_resource_extra_depths(tokens)
+      comment_depths = calculate_comment_depths(tokens)
       protected_lines = calculate_protected_lines(tokens)
       relationship_lines = calculate_relationship_lines(tokens)
 
@@ -178,6 +179,7 @@ module PuppetFormat4sp
         current,
         structural_depths,
         resource_extra_depths,
+        comment_depths,
         protected_lines,
         relationship_lines
       )
@@ -849,13 +851,13 @@ module PuppetFormat4sp
       text,
       structural_depths,
       resource_extra_depths,
+      comment_depths,
       protected_lines,
       relationship_lines
     )
       effective_depths = structural_depths.to_h do |line, depth|
         [line, depth + resource_extra_depths.fetch(line, 0)]
       end
-      comment_depths = calculate_comment_depths(text, effective_depths)
 
       text.lines.each_with_index.map do |line, index|
         line_number = index + 1
@@ -881,38 +883,79 @@ module PuppetFormat4sp
       end.join
     end
 
-    def calculate_comment_depths(text, depths)
-      line_count = text.lines.length
-      previous = Array.new(line_count + 1)
-      following = Array.new(line_count + 1)
-      current = nil
-
-      1.upto(line_count) do |line_number|
-        previous[line_number] = current
-        current = depths[line_number] if depths.key?(line_number)
+    # Calculate indentation for comment-only lines from lexer state rather
+    # than from neighboring source lines. This keeps comments immediately
+    # inside a resource declaration at the resource-title depth and comments
+    # inside a resource body at the resource-parameter depth.
+    def calculate_comment_depths(tokens)
+      depths = {}
+      stack = []
+      next_frame_id = 0
+      active_resource_frame_id = nil
+      significant = significant_tokens(tokens)
+      significant_indexes = token_index_by_identity(significant)
+      significant_lines = significant.each_with_object({}) do |token, lines|
+        lines[token.line] = true
       end
 
-      current = nil
-      line_count.downto(1) do |line_number|
-        following[line_number] = current
-        current = depths[line_number] if depths.key?(line_number)
+      tokens.each do |token|
+        type = token.type
+
+        if COMMENT_TYPES.include?(type)
+          depth = stack.length + (active_resource_frame_id ? 1 : 0)
+          last_line = token.line + newline_count(token_source(token))
+
+          token.line.upto(last_line) do |line|
+            # Trailing comments share a line with Puppet code. The code token
+            # already determines that line's indentation.
+            next if significant_lines[line]
+
+            depths[line] ||= depth
+          end
+
+          next
+        end
+
+        next unless significant_token?(token)
+
+        index = significant_indexes.fetch(token.object_id)
+
+        if resource_title_colon?(significant, index, stack)
+          next_token = significant[index + 1]
+          active_resource_frame_id =
+            if next_token&.type == :SEMIC && next_token.line == token.line
+              nil
+            else
+              stack.last[:id]
+            end
+        end
+
+        active_resource_frame_id = nil if type == :SEMIC
+
+        if OPEN_TO_CLOSE.key?(type)
+          next_frame_id += 1
+          stack << {
+            id: next_frame_id,
+            type: type,
+            resource: resource_opening_brace?(significant, index),
+          }
+          next
+        end
+
+        next unless CLOSE_TO_OPEN.key?(type)
+
+        frame = stack.last
+        if type == :RBRACE &&
+           frame&.dig(:type) == :LBRACE &&
+           frame[:resource] &&
+           active_resource_frame_id == frame[:id]
+          active_resource_frame_id = nil
+        end
+
+        stack.pop unless stack.empty?
       end
 
-      result = {}
-      text.lines.each_with_index do |line, index|
-        line_number = index + 1
-        next unless comment_only_line?(line)
-
-        neighboring = [previous[line_number], following[line_number]].compact
-        result[line_number] = neighboring.empty? ? 0 : neighboring.min
-      end
-
-      result
-    end
-
-    def comment_only_line?(line)
-      stripped = strip_leading_spaces_tabs(line)
-      stripped.start_with?('#', '//', '/*', '*')
+      depths
     end
 
     def replace_leading_whitespace(line, depth)
