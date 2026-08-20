@@ -137,7 +137,8 @@ module PuppetFormat4sp
       align_assignments_sequential: false,
       split_empty_resource_body: true,
       normalize_relationships: true,
-      indent_reference_relationships: true
+      indent_reference_relationships: true,
+      align_comments: true
     )
       raise ArgumentError, 'indent_width must be greater than zero' unless indent_width.positive?
 
@@ -153,6 +154,7 @@ module PuppetFormat4sp
       @split_empty_resource_body = split_empty_resource_body
       @normalize_relationships = normalize_relationships
       @indent_reference_relationships = indent_reference_relationships
+      @align_comments = align_comments
     end
 
     def format
@@ -864,6 +866,10 @@ module PuppetFormat4sp
 
         next line if protected_lines[line_number]
         next line if line.strip.empty?
+
+        # comment_depths contains only lexer-confirmed standalone comment lines.
+        # Trailing comments on Puppet code lines are not included.
+        next line if !@align_comments && comment_depths.key?(line_number)
 
         if (relationship = relationship_lines[line_number])
           depth = structural_depths[line_number]

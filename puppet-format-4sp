@@ -10,18 +10,16 @@ options = {
   check: false,
   diff: false,
   indent_width: 4,
-
   normalize_rockets: true,
   align_rockets_sequential: true,
   align_rockets_by_indent: false,
   align_rockets_oneline: false,
-
   normalize_assignments: false,
   align_assignments_sequential: true,
   split_empty_resource_body: true,
-
   normalize_relationships: true,
   indent_reference_relationships: true,
+  align_comments: true
 }
 
 parser = OptionParser.new do |opts|
@@ -150,6 +148,12 @@ opts.on(
   options[:indent_reference_relationships] = value
 end
 
+opts.on(
+  '--[no-]align-comments',
+  'Normalize indentation of standalone comments'
+) do |value|
+  options[:align_comments] = value
+end
 
   opts.separator ''
   opts.separator 'Other options:'
@@ -292,7 +296,8 @@ files.each do |path|
       split_empty_resource_body: options[:split_empty_resource_body],
 
       normalize_relationships: options[:normalize_relationships],
-      indent_reference_relationships: options[:indent_reference_relationships]
+      indent_reference_relationships: options[:indent_reference_relationships],
+      align_comments: options[:align_comments]
     )
     formatted = formatter.format
 
