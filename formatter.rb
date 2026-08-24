@@ -3,67 +3,83 @@
 
 # frozen_string_literal: true
 
+# frozen_string_literal: true
+
+require 'rubygems'
+
 module PuppetFormat4sp
   module DependencyLoader
-    class DependencyLoadError < LoadError
+    class DependencyLoadError < StandardError
     end
 
     PUPPET_ROOT =
       '/opt/puppetlabs/puppet'.freeze
 
-    FALLBACKS = {
-      'puppet' => [
-        "#{PUPPET_ROOT}/lib/ruby/vendor_ruby",
+    PUPPET_RUBY_ROOT =
+      "#{PUPPET_ROOT}/lib/ruby".freeze
 
-        #
-        # Puppet has many transitive dependencies:
-        #
-        #   concurrent-ruby
-        #   hiera
-        #   semantic_puppet
-        #   puppet-resource_api
-        #   etc.
-        #
-        # Add all Puppet AIO vendor gems, but only after
-        # the normal system require has failed.
-        #
-        "#{PUPPET_ROOT}/lib/ruby/vendor_gems/gems/*/lib",
-      ],
+    PUPPET_VENDOR_RUBY =
+      "#{PUPPET_RUBY_ROOT}/vendor_ruby".freeze
 
-      'puppet-lint' => [
-        "#{PUPPET_ROOT}/lib/ruby/vendor_ruby",
-        "#{PUPPET_ROOT}/lib/ruby/vendor_gems/gems/*/lib",
-      ],
-    }.freeze
+    #
+    # Normal Puppet AIO gems:
+    #
+    #   /opt/puppetlabs/puppet/lib/ruby/gems/3.2.0/...
+    #
+    # Additional Puppet vendor gems:
+    #
+    #   /opt/puppetlabs/puppet/lib/ruby/vendor_gems/...
+    #
+    PUPPET_GEMSPEC_GLOBS = [
+      "#{PUPPET_RUBY_ROOT}/gems/*/specifications/*.gemspec",
+      "#{PUPPET_RUBY_ROOT}/vendor_gems/specifications/*.gemspec",
+    ].freeze
+
+    #
+    # Some vendor gems may not have a usable gemspec in the
+    # location above. Their normal lib directories are therefore
+    # included as a secondary fallback.
+    #
+    PUPPET_VENDOR_GEM_LIB_GLOB =
+      "#{PUPPET_RUBY_ROOT}/vendor_gems/gems/*/lib".freeze
 
     module_function
 
+    #
+    # Load all requested top-level dependencies.
+    #
+    # Pass 1:
+    #   Try everything using only the normal system Ruby environment.
+    #
+    # Pass 2:
+    #   If anything failed, add Puppet Labs paths AFTER the existing
+    #   system paths and retry only those dependencies which failed.
+    #
     def load_all(*names)
       failures = {}
 
       #
       # PASS 1
       #
-      # Try every dependency using only the normal
-      # system Ruby environment.
+      # Do not touch /opt/puppetlabs yet.
       #
       names.each do |name|
         error = try_require(name)
         failures[name] = error if error
       end
 
+      return true if failures.empty?
+
       #
       # PASS 2
       #
-      # Only dependencies which failed above get
-      # their Puppet Labs fallback paths.
+      # At least one top-level dependency was unavailable from the
+      # normal system Ruby environment.
       #
-      failures.each do |name, system_error|
-        fallback_paths =
-          add_fallback_paths(name)
+      fallback_paths = add_puppetlabs_paths
 
-        fallback_error =
-          try_require(name)
+      failures.each do |name, system_error|
+        fallback_error = try_require(name)
 
         next unless fallback_error
 
@@ -78,6 +94,9 @@ module PuppetFormat4sp
       true
     end
 
+    #
+    # Return nil on success, otherwise return the LoadError.
+    #
     def try_require(name)
       require name
       nil
@@ -85,13 +104,60 @@ module PuppetFormat4sp
       error
     end
 
-    def add_fallback_paths(name)
-      configured_paths =
-        FALLBACKS.fetch(name, [])
+    #
+    # Discover and append Puppet Labs Ruby paths.
+    #
+    # Important:
+    #
+    #   $LOAD_PATH << path
+    #
+    # is intentional.
+    #
+    # We do NOT use unshift because the desired priority is:
+    #
+    #   1. system Ruby libraries / gems
+    #   2. Puppet Labs fallback libraries / gems
+    #
+    def add_puppetlabs_paths
+      paths = []
+
+      #
+      # Puppet's vendor_ruby tree.
+      #
+      if File.directory?(PUPPET_VENDOR_RUBY)
+        paths << PUPPET_VENDOR_RUBY
+      end
+
+      #
+      # Read installed Puppet Labs gemspecs.
+      #
+      # This is preferable to assuming every gem uses:
+      #
+      #   gem/lib
+      #
+      # For example concurrent-ruby uses:
+      #
+      #   lib/concurrent-ruby
+      #
+      # and its gemspec tells us that correctly.
+      #
+      puppetlabs_gemspecs.each do |gemspec|
+        spec = load_gemspec(gemspec)
+        next unless spec
+
+        paths.concat(spec.full_require_paths)
+      end
+
+      #
+      # Some Puppet vendor_gems are laid out separately from the
+      # regular Ruby gem tree. Add their lib directories as fallback.
+      #
+      paths.concat(
+        Dir.glob(PUPPET_VENDOR_GEM_LIB_GLOB).sort
+      )
 
       paths =
-        configured_paths
-          .flat_map { |path| expand_path(path) }
+        paths
           .select { |path| File.directory?(path) }
           .uniq
 
@@ -99,12 +165,7 @@ module PuppetFormat4sp
         next if $LOAD_PATH.include?(path)
 
         #
-        # Important:
-        #
-        # append rather than prepend.
-        #
-        # Existing system Ruby paths therefore
-        # retain priority.
+        # Append: system paths retain priority.
         #
         $LOAD_PATH << path
       end
@@ -112,18 +173,26 @@ module PuppetFormat4sp
       paths
     end
 
-    def expand_path(path)
-      if glob_path?(path)
-        Dir.glob(path).sort
-      else
-        [path]
-      end
+    #
+    # Return all Puppet Labs gemspec files.
+    #
+    def puppetlabs_gemspecs
+      PUPPET_GEMSPEC_GLOBS
+        .flat_map { |pattern| Dir.glob(pattern) }
+        .uniq
+        .sort
     end
 
-    def glob_path?(path)
-      path.include?('*') ||
-        path.include?('?') ||
-        path.include?('[')
+    #
+    # Load one gemspec.
+    #
+    # An invalid/unsupported gemspec should not prevent us from
+    # inspecting the remaining Puppet Labs gems.
+    #
+    def load_gemspec(path)
+      Gem::Specification.load(path)
+    rescue StandardError
+      nil
     end
 
     def raise_dependency_error(
@@ -134,7 +203,7 @@ module PuppetFormat4sp
     )
       paths =
         if fallback_paths.empty?
-          '  (no existing fallback paths found)'
+          '  (no existing Puppet Labs fallback paths found)'
         else
           fallback_paths
             .map { |path| "  #{path}" }
