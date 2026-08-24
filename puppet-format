@@ -337,7 +337,8 @@ module PuppetFormat4sp
       split_empty_resource_body: true,
       normalize_relationships: true,
       indent_reference_relationships: true,
-      align_comments: true
+      align_comments: true,
+      align_array_elements: true
     )
       raise ArgumentError, 'indent_width must be greater than zero' unless indent_width.positive?
 
@@ -354,6 +355,7 @@ module PuppetFormat4sp
       @normalize_relationships = normalize_relationships
       @indent_reference_relationships = indent_reference_relationships
       @align_comments = align_comments
+      @align_array_elements = align_array_elements
 
     end
 
@@ -362,6 +364,14 @@ module PuppetFormat4sp
 
       current = @source
       tokens = lex(current)
+
+      if @align_array_elements
+        current = normalize_multiline_array_layout(
+          current,
+          tokens
+        )
+        tokens = lex(current)
+      end
 
       current = normalize_resource_layout(current, tokens)
       tokens = lex(current)
@@ -529,6 +539,25 @@ module PuppetFormat4sp
         previous_end = end_offset
       end
     end
+
+    def calculate_array_pairs(significant)
+      pairs = {}
+      stack = []
+    
+      significant.each_with_index do |token, index|
+        case token.type
+        when :LBRACK
+          stack << index
+    
+        when :RBRACK
+          opening = stack.pop
+          pairs[opening] = index if opening
+        end
+      end
+    
+      pairs
+    end
+
 
     def token_index_by_identity(tokens)
       tokens.each_with_index.to_h { |token, index| [token.object_id, index] }
@@ -711,6 +740,124 @@ module PuppetFormat4sp
       depths
     end
 
+    def normalize_multiline_array_layout(text, tokens)
+      significant = significant_tokens(tokens)
+      return text if significant.empty?
+    
+      pairs = calculate_array_pairs(significant)
+      return text if pairs.empty?
+    
+      token_indexes = token_index_by_identity(tokens)
+      line_offsets = line_start_offsets(text)
+      newline = preferred_newline(text)
+      edits = []
+    
+      pairs.each do |open_index, close_index|
+        opening = significant[open_index]
+        closing = significant[close_index]
+    
+        #
+        # Do not expand compact one-line arrays.
+        #
+        next if opening.line == closing.line
+    
+        #
+        # [
+        #     first,
+        #
+        # instead of:
+        #
+        # [ first,
+        #
+        if open_index + 1 < close_index
+          first_element = significant[open_index + 1]
+    
+          replace_inline_token_gap!(
+            edits,
+            tokens,
+            token_indexes,
+            opening,
+            first_element,
+            line_offsets,
+            newline,
+            allow_adjacent: true
+          )
+        end
+    
+        #
+        # Put top-level array elements on separate lines.
+        #
+        # Nested commas such as:
+        #
+        #   func($a, $b)
+        #   { 'a' => 1, 'b' => 2 }
+        #   ['a', 'b']
+        #
+        # are deliberately ignored.
+        #
+        nested_depth = 0
+    
+        ((open_index + 1)...close_index).each do |index|
+          token = significant[index]
+    
+          if OPEN_TO_CLOSE.key?(token.type)
+            nested_depth += 1
+            next
+          end
+    
+          if CLOSE_TO_OPEN.key?(token.type)
+            nested_depth -= 1 if nested_depth.positive?
+            next
+          end
+    
+          next unless token.type == :COMMA
+          next unless nested_depth.zero?
+    
+          next_token = significant[index + 1]
+    
+          next unless next_token
+          next unless index + 1 < close_index
+    
+          replace_inline_token_gap!(
+            edits,
+            tokens,
+            token_indexes,
+            token,
+            next_token,
+            line_offsets,
+            newline,
+            allow_adjacent: true
+          )
+        end
+    
+        #
+        # Last element
+        # ]
+        #
+        # instead of:
+        #
+        # last_element ]
+        #
+        previous = significant[close_index - 1]
+    
+        if previous &&
+           !previous.equal?(opening)
+    
+          replace_inline_token_gap!(
+            edits,
+            tokens,
+            token_indexes,
+            previous,
+            closing,
+            line_offsets,
+            newline,
+            allow_adjacent: true
+          )
+        end
+      end
+    
+      apply_source_edits(text, edits)
+    end
 
 
     def normalize_conditional_layout(text, tokens)
@@ -1722,7 +1869,8 @@ options = {
   split_empty_resource_body: true,
   normalize_relationships: true,
   indent_reference_relationships: false,
-  align_comments: true
+  align_comments: true,
+  align_array_elements: true
 }
 
 parser = OptionParser.new do |opts|
@@ -1846,7 +1994,8 @@ end
 
 opts.on(
   '--[no-]indent-reference-relationships',
-  'Indent relationship lines targeting resource references'
+  'Indent relationship lines targeting resource references',
+    '(default: disabled)'
 ) do |value|
   options[:indent_reference_relationships] = value
 end
@@ -1856,6 +2005,13 @@ opts.on(
   'Normalize indentation of standalone comments'
 ) do |value|
   options[:align_comments] = value
+end
+
+opts.on(
+  '--[no-]align-array-elements',
+  'Align elements of multiline arrays'
+) do |value|
+  options[:align_array_elements] = value
 end
 
   opts.separator ''
