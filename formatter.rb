@@ -122,6 +122,17 @@ module PuppetFormat4sp
       CLASSREF
     ].freeze
 
+    CONDITIONAL_KEYWORD_TYPES = %i[
+      IF
+      ELSIF
+      ELSE
+    ].freeze
+
+    CONDITIONAL_CONTINUATION_TYPES = %i[
+      ELSIF
+      ELSE
+    ].freeze
+
     HASH_ROCKET_TYPE = :FARROW
     ASSIGNMENT_TYPE = :EQUALS
 
@@ -164,6 +175,9 @@ module PuppetFormat4sp
       tokens = lex(current)
 
       current = normalize_resource_layout(current, tokens)
+      tokens = lex(current)
+
+      current = normalize_conditional_layout(current, tokens)
       tokens = lex(current)
 
       if @normalize_relationships
@@ -359,6 +373,42 @@ module PuppetFormat4sp
       edits << [left_end, right_start, replacement]
     end
 
+    def replace_layout_token_gap!(
+      edits,
+      tokens,
+      token_indexes,
+      left_token,
+      right_token,
+      line_offsets,
+      replacement
+    )
+      left_index = token_indexes.fetch(left_token.object_id)
+      right_index = token_indexes.fetch(right_token.object_id)
+    
+      return unless right_index > left_index
+      return unless layout_token_range?(
+        tokens,
+        left_index + 1,
+        right_index
+      )
+    
+      left_end =
+        token_offset(left_token, line_offsets) +
+        token_width(left_token)
+    
+      right_start =
+        token_offset(right_token, line_offsets)
+    
+      return if right_start < left_end
+    
+      edits << [
+        left_end,
+        right_start,
+        replacement,
+      ]
+    end
+
+
     def preferred_newline(text)
       text.include?("\r\n") ? "\r\n" : "\n"
     end
@@ -386,6 +436,208 @@ module PuppetFormat4sp
       tokens[first_index...last_index].all? do |token|
         LAYOUT_WHITESPACE_TYPES.include?(token.type)
       end
+    end
+
+    def conditional_body_open_index(
+      significant,
+      keyword_index,
+      brace_depths
+    )
+      keyword = significant[keyword_index]
+      base_depth = brace_depths.fetch(keyword_index)
+    
+      candidate = nil
+      index = keyword_index + 1
+    
+      while index < significant.length
+        token = significant[index]
+        depth = brace_depths.fetch(index)
+    
+        #
+        # We intentionally find the opening brace on the
+        # conditional header line.
+        #
+        break if token.line != keyword.line
+        break if depth < base_depth
+    
+        if depth == base_depth
+          #
+          # We've reached the next branch.
+          #
+          break if CONDITIONAL_KEYWORD_TYPES.include?(
+            token.type
+          )
+    
+          break if token.type == :SEMIC
+    
+          #
+          # Keep the last top-level { on the header line.
+          #
+          # This is useful for constructs such as:
+          #
+          #   if $x == { 'a' => 1 } {
+          #
+          # The hash { } is encountered first; the final {
+          # is the actual conditional body.
+          #
+          candidate = index if token.type == :LBRACE
+        end
+    
+        index += 1
+      end
+    
+      candidate
+    end
+
+    def calculate_brace_pairs(significant)
+      pairs = {}
+      stack = []
+    
+      significant.each_with_index do |token, index|
+        case token.type
+        when :LBRACE
+          stack << index
+    
+        when :RBRACE
+          opening = stack.pop
+          pairs[opening] = index if opening
+        end
+      end
+    
+      pairs
+    end
+
+    def calculate_brace_depths(significant)
+      depths = {}
+      depth = 0
+    
+      significant.each_with_index do |token, index|
+        depth -= 1 if token.type == :RBRACE
+    
+        depths[index] = depth
+    
+        depth += 1 if token.type == :LBRACE
+      end
+    
+      depths
+    end
+
+
+
+    def normalize_conditional_layout(text, tokens)
+      significant = significant_tokens(tokens)
+      return text if significant.empty?
+    
+      token_indexes = token_index_by_identity(tokens)
+      line_offsets = line_start_offsets(text)
+      newline = preferred_newline(text)
+    
+      brace_pairs = calculate_brace_pairs(significant)
+      brace_depths = calculate_brace_depths(significant)
+    
+      edits = []
+    
+      significant.each_with_index do |token, keyword_index|
+        next unless CONDITIONAL_KEYWORD_TYPES.include?(
+          token.type
+        )
+    
+        open_index =
+          conditional_body_open_index(
+            significant,
+            keyword_index,
+            brace_depths
+          )
+    
+        next unless open_index
+    
+        close_index = brace_pairs[open_index]
+        next unless close_index
+    
+        opening = significant[open_index]
+        closing = significant[close_index]
+    
+        #
+        #   if $foo {}
+        #
+        # becomes:
+        #
+        #   if $foo {
+        #   }
+        #
+        first_body_token =
+          significant[open_index + 1]
+    
+        if first_body_token &&
+           first_body_token.line == opening.line
+    
+          replace_layout_token_gap!(
+            edits,
+            tokens,
+            token_indexes,
+            opening,
+            first_body_token,
+            line_offsets,
+            newline
+          )
+        end
+    
+        #
+        # Also handle:
+        #
+        #   if $foo { notify { 'x': } }
+        #
+        # so the closing conditional brace gets its own line.
+        #
+        previous_body_token =
+          significant[close_index - 1]
+    
+        if previous_body_token &&
+           !previous_body_token.equal?(opening) &&
+           previous_body_token.line == closing.line
+    
+          replace_layout_token_gap!(
+            edits,
+            tokens,
+            token_indexes,
+            previous_body_token,
+            closing,
+            line_offsets,
+            newline
+          )
+        end
+    
+        #
+        # Keep elsif/else attached to the previous closing brace:
+        #
+        #   }
+        #   elsif ...
+        #
+        # ->
+        #
+        #   } elsif ...
+        #
+        continuation =
+          significant[close_index + 1]
+    
+        next unless continuation
+    
+        next unless CONDITIONAL_CONTINUATION_TYPES.include?(
+          continuation.type
+        )
+    
+        replace_layout_token_gap!(
+          edits,
+          tokens,
+          token_indexes,
+          closing,
+          continuation,
+          line_offsets,
+          ' '
+        )
+      end
+    
+      apply_source_edits(text, edits)
     end
 
     def normalize_relationship_layout(text, tokens)
