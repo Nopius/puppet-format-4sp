@@ -1,211 +1,397 @@
-# puppet-format-4sp
+# puppet-format
 
-`puppet-format-4sp` is a Puppet manifest formatter focused on predictable **4-space indentation**, resource layout normalization, hash-rocket alignment, assignment alignment, and safe handling of multiline strings and heredocs.
+`puppet-format` is a Puppet manifest formatter focused on predictable indentation and lexer-aware source transformations.
 
-It is intended for Puppet 8 code and uses `puppet-lint`'s lexer to avoid formatting inside quoted multiline content.
+The formatter is intended for Puppet 8 code, uses 4-space indentation by default, and relies on `puppet-lint` lexer tokens instead of regular-expression parsing wherever practical.
+
+It formats resource declarations, hash rockets, assignments, comments, conditional blocks, and Puppet relationship operators while protecting multiline strings and heredocs from unsafe rewrites.
 
 ## Features
 
 - 4-space structural indentation by default
 - Resource titles are moved to their own line
-- Resource parameters are indented one level below the resource title
-- Supports normal resources, defined resources, and resource-like `class { ... }` declarations
-- Optional hash-rocket normalization and alignment
-- Optional assignment normalization and alignment
-- Optional handling of empty resource bodies (`title:;`)
+- Resource parameters are indented one level below resource titles
+- Supports normal resources, defined resources, and resource-style `class { ... }` declarations
+- Normalizes `if` / `elsif` / `else` block layout
+- Keeps `elsif` and `else` on the same line as the preceding closing brace
+- Normalizes Puppet relationship operators `->` and `~>`
+- Optional indentation of relationship lines targeting resource references
+- Optional hash-rocket (`=>`) normalization and alignment
+- Optional variable-assignment (`=`) normalization and alignment
+- Optional comment indentation control
+- Configurable handling of empty resource bodies
 - Preserves heredocs and multiline quoted strings
-- Preserves resource relationship operators such as `->` and `~>`
 - Removes trailing whitespace outside protected multiline content
+- UTF-8-safe byte-offset source editing
 - Validates Puppet syntax before and after formatting
 - `--check` and `--diff` modes for CI and code review
 
+## Requirements
+
+- Ruby 3.x
+- Puppet 8
+- `puppet-lint` 5.x
+
+The dependency loader is designed to prefer libraries available to the system Ruby. If a required dependency cannot be loaded normally, Puppet Labs paths under `/opt/puppetlabs/puppet` can be added as fallback paths while the formatter continues to run under the system Ruby.
+
+System Ruby paths retain priority over fallback paths.
+
+## Usage
+
+Format a file in place:
+
+```bash
+puppet-format manifest.pp
+```
+
+Format all Puppet files below a directory:
+
+```bash
+puppet-format .
+```
+
+Check whether files require formatting:
+
+```bash
+puppet-format --check .
+```
+
+Show a unified diff without modifying files:
+
+```bash
+puppet-format --check --diff .
+```
+
+A useful CI invocation is:
+
+```bash
+puppet-format --check --diff manifests/
+```
+
+## Main options
+
+The exact defaults are defined by the command-line wrapper, but the formatter supports the following formatting controls:
+
+```text
+--indent-width N
+
+--[no-]normalize-rockets
+--[no-]align-rockets-sequential
+--[no-]align-rockets-by-indent
+--[no-]align-rockets-oneline
+
+--[no-]normalize-assignments
+--[no-]align-assignments-sequential
+
+--[no-]split-empty-resource-body
+
+--[no-]normalize-relationships
+--[no-]indent-reference-relationships
+
+--[no-]align-comments
+
+--check
+--diff
+```
+
+Conditional block normalization is part of the normal structural formatting pass and does not require a separate option.
+
 ---
 
-## Example
+# Conditional formatting
+
+Puppet uses `elsif`, not `elif`.
+
+The formatter normalizes conditional blocks to the common Puppet layout:
+
+```puppet
+if $condition {
+    ...
+} elsif $other_condition {
+    ...
+} else {
+    ...
+}
+```
+
+## Empty conditional blocks
 
 Input:
 
 ```puppet
-file { $payload_file: ensure  => file,
-             mode    => '0640', owner => 'root',
-             group   => 'root',
-             content => to_json_pretty($payload),
-             require => File[$payload_dir],
+if $a {} elsif $b {} else {}
+```
+
+Output:
+
+```puppet
+if $a {
+} elsif $b {
+} else {
 }
 ```
 
-Formatted:
+The opening and closing braces of an empty conditional body are therefore placed on separate lines.
+
+## `else` placement
+
+Input:
+
+```puppet
+if $enabled {
+    notice('enabled')
+}
+else {
+    notice('disabled')
+}
+```
+
+Output:
+
+```puppet
+if $enabled {
+    notice('enabled')
+} else {
+    notice('disabled')
+}
+```
+
+Likewise:
+
+```puppet
+}
+elsif $condition {
+```
+
+is normalized to:
+
+```puppet
+} elsif $condition {
+```
+
+## One-line conditional bodies
+
+Input:
+
+```puppet
+if $a { notice('a') } elsif $b { notice('b') } else { notice('c') }
+```
+
+Output:
+
+```puppet
+if $a {
+    notice('a')
+} elsif $b {
+    notice('b')
+} else {
+    notice('c')
+}
+```
+
+Conditional layout is lexer-driven. The formatter identifies Puppet conditional tokens and brace structure instead of parsing `if`, `elsif`, and `else` with raw regular expressions.
+
+---
+
+# Resource relationships
+
+Puppet relationship operators are handled separately from hash rockets:
+
+```text
+->
+~>
+```
+
+They are never treated as `=>`.
+
+## Relationship normalization
+
+With relationship normalization enabled, the relationship operator starts a continuation line and the target follows the operator on the same line.
+
+Input:
+
+```puppet
+file {
+    '/tmp/example':
+        ensure => file;
+} -> service {
+    'example':
+        ensure => running;
+}
+```
+
+Output:
+
+```puppet
+file {
+    '/tmp/example':
+        ensure => file;
+}
+-> service {
+    'example':
+        ensure => running;
+}
+```
+
+The same rule applies to notification relationships:
+
+```puppet
+file {
+    '/etc/example.conf':
+        ensure => file;
+}
+~> service {
+    'example':
+        ensure => running;
+}
+```
+
+These variants are normalized consistently:
+
+```puppet
+}->file {
+```
+
+```puppet
+} ->
+file {
+```
+
+```puppet
+}
+->
+file {
+```
+
+into:
+
+```puppet
+}
+-> file {
+```
+
+Use:
+
+```bash
+puppet-format --no-normalize-relationships manifest.pp
+```
+
+to disable relationship layout normalization.
+
+## Resource-reference relationships
+
+The formatter recognizes resource references through lexer token types, for example:
+
+```puppet
+Class['example']
+File['/tmp/example']
+Exec['reload']
+```
+
+With reference-relationship indentation enabled:
+
+```puppet
+Class['example'] -> File['/tmp/example'] ~> Exec['reload']
+```
+
+is formatted as:
+
+```puppet
+Class['example']
+    -> File['/tmp/example']
+    ~> Exec['reload']
+```
+
+Disable the additional indentation with:
+
+```bash
+puppet-format --no-indent-reference-relationships manifest.pp
+```
+
+Relationship normalization is token-based and does not intentionally move an operator across comments. Comments act as layout boundaries.
+
+---
+
+# Resource declaration formatting
+
+Resource layout is normalized independently of hash-rocket alignment.
+
+## Resource title
+
+Input:
+
+```puppet
+file { $payload_dir:
+    ensure => directory,
+}
+```
+
+Output:
+
+```puppet
+file {
+    $payload_dir:
+        ensure => directory,
+}
+```
+
+## Inline resource parameters
+
+Input:
+
+```puppet
+file { $payload_file: ensure => file, mode => '0640', owner => 'root', }
+```
+
+Output:
 
 ```puppet
 file {
     $payload_file:
-        ensure  => file,
-        mode    => '0640',
-        owner   => 'root',
-        group   => 'root',
-        content => to_json_pretty($payload),
-        require => File[$payload_dir],
+        ensure => file,
+        mode   => '0640',
+        owner  => 'root',
 }
 ```
 
----
+Only top-level resource parameter separators are split. Commas inside nested calls, arrays, and hashes are not treated as resource parameter boundaries.
 
-## Requirements
+For example:
 
-Typical environment:
-
-- Puppet 8
-- Ruby 3
-- `puppet-lint` 5.x
-
-If Puppet is installed from Puppet Labs packages, using Puppet's embedded Ruby is recommended:
-
-```bash
-#!/opt/puppetlabs/puppet/bin/ruby
+```puppet
+file {
+    '/tmp/example':
+        content => template($a, $b),
+        options => ['one', 'two'],
+}
 ```
 
-If `puppet-lint` is installed in a separate gem tree, its `lib` directory can be added explicitly:
+## Resource-style class declarations
 
-```ruby
-$LOAD_PATH.unshift('/usr/local/share/gems/gems/puppet-lint-5.1.1/lib')
+The formatter recognizes resource-style class declarations:
 
-require 'puppet'
-require 'puppet-lint'
+```puppet
+class {
+    'example':
+        parameter => 'value';
+}
 ```
 
-This avoids exposing an entire gem tree built for a different Ruby ABI.
-
-If you don't have Puppet Labs server installed, then use Ruby gem installation for both required modules:
-
-```bash
-gem install puppet
-gem install puppet-lint
-```
- 
-and use appropriate path for system-wide ruby (not embedded):
-
-```bash
-#!/usr/bin/ruby
-```
-
----
-
-## Usage
-
-Format a file:
-
-```bash
-puppet-format-4sp manifest.pp
-```
-
-Check whether formatting changes are required:
-
-```bash
-puppet-format-4sp --check manifest.pp
-```
-
-Show the proposed changes:
-
-```bash
-puppet-format-4sp --check --diff manifest.pp
-```
-
-A common CI invocation is:
-
-```bash
-puppet-format-4sp --check --diff manifests/*.pp
-```
-
----
-
-# Options
-
-## `--check`
-
-Do not silently accept formatting differences. Use this mode in CI or pre-commit checks.
-
-Example:
-
-```bash
-puppet-format-4sp --check manifest.pp
-```
-
-If the file requires formatting, the command reports it instead of treating the file as already formatted.
-
----
-
-## `--diff`
-
-Show a unified diff between the original and formatted Puppet source.
-
-Example:
-
-```bash
-puppet-format-4sp --check --diff manifest.pp
-```
-
-Example output:
-
-```diff
--    file { $payload_dir:
-+    file {
-+        $payload_dir:
-             ensure => directory,
-```
-
----
-
-## `--indent-width N`
-
-Controls the number of spaces used for one indentation level.
-
-Default:
-
-```text
-4
-```
-
-Example:
-
-```bash
-puppet-format-4sp --indent-width 4 manifest.pp
-```
-
-Input:
+This is distinct from a normal class definition:
 
 ```puppet
 class example {
-  if $enabled {
-    notify { 'enabled': }
-  }
-}
-```
-
-With `--indent-width 4`:
-
-```puppet
-class example {
-    if $enabled {
-        notify {
-            'enabled':
-        }
-    }
+    ...
 }
 ```
 
 ---
 
-## `--[no-]normalize-rockets`
+# Hash rockets
 
-Controls spacing around Puppet hash rockets (`=>`).
+## Normalization
 
-Default:
-
-```text
-enabled
-```
-
-### Enabled
+With `--normalize-rockets`, irregular spacing around `=>` is normalized.
 
 Input:
 
@@ -216,7 +402,7 @@ Input:
 }
 ```
 
-Output:
+Output without alignment padding:
 
 ```puppet
 {
@@ -225,23 +411,9 @@ Output:
 }
 ```
 
-Normalization happens before alignment, so a later alignment option may intentionally add padding again.
+## Sequential alignment
 
-### Disabled
-
-```bash
-puppet-format-4sp --no-normalize-rockets manifest.pp
-```
-
-Existing spaces around `=>` are preserved unless another enabled formatting pass changes them.
-
----
-
-## `--[no-]align-rockets-sequential`
-
-Aligns `=>` for sequential hash/resource parameter lines.
-
-Example input:
+Input:
 
 ```puppet
 file {
@@ -263,139 +435,29 @@ file {
 }
 ```
 
-Disable with:
-
-```bash
-puppet-format-4sp --no-align-rockets-sequential manifest.pp
-```
-
-Normalization and alignment are separate operations. With both enabled, normalization first removes irregular spacing and alignment then adds only the spacing required for alignment.
+Normalization and alignment are separate operations: normalization removes irregular spacing first, and alignment can then add only the padding needed for visual alignment.
 
 ---
 
-## `--[no-]align-rockets-by-indent`
+# Variable assignments
 
-Aligns hash rockets more broadly by structural block and indentation level.
+Assignment formatting is lexer-driven and applies to ordinary variable assignment (`=`), not hash rockets or comparison operators.
 
-This can align entries that are not necessarily directly adjacent, as long as they belong to the same enclosing structural block and have the same indentation.
-
-Example:
-
-```puppet
-$settings = $flag ? {
-    true => 1,
-    "very_long_flag_value" => { 
-        "option 1" => true,
-        "very long option name" => false,
-    },
-    default => 0
-}
-```
-
-Without alignment:
-
-```puppet
-$settings = $flag ? {
-    true                   => 1,
-    "very_long_flag_value" => {
-        "option 1"              => true,
-        "very long option name" => false,
-    },
-    default => 0
-```
-
-With alignment (default => is indented to the same level, even if not sequential):
-
-```puppet
-$settings = $flag ? {
-    true                   => 1,
-    "very_long_flag_value" => {
-        "option 1"              => true,
-        "very long option name" => false,
-    },
-    default                => 0
-}
-```
-
-Disable with:
-
-```bash
-puppet-format-4sp --no-align-rockets-by-indent manifest.pp
-```
-
-Use this when you want broader visual alignment than `--align-rockets-sequential`.
-
----
-
-## `--[no-]align-rockets-oneline`
-
-Controls whether complete one-line `{ ... => ... }` expressions are eligible for rocket alignment.
-
-Default:
-
-```text
-disabled
-```
-
-Example one-line hash:
-
-```puppet
-$template => { 'settings' => {}, 'aliases' => {} }
-```
-
-With the default setting, the formatter does not use this one-line hash as an alignment candidate.
-
-Enable with:
-
-```bash
-puppet-format-4sp --align-rockets-oneline manifest.pp
-```
-
-Important: `--no-align-rockets-oneline` affects **alignment**, not basic rocket normalization. `--normalize-rockets` may still normalize spaces inside a one-line hash.
-
----
-
-## `--[no-]normalize-assignments`
-
-Normalizes spaces around plain variable assignment (`=`).
-
-Example input:
+Input:
 
 ```puppet
 $template_name=$title
-$index_prefix =regsubst($index_pattern, '-?\*.*$', '')
+$index_prefix =regsubst($index_pattern, '-?\\*.*$', '')
 ```
 
 With assignment normalization:
 
 ```puppet
 $template_name = $title
-$index_prefix = regsubst($index_pattern, '-?\*.*$', '')
+$index_prefix = regsubst($index_pattern, '-?\\*.*$', '')
 ```
 
-Enable with:
-
-```bash
-puppet-format-4sp --normalize-assignments manifest.pp
-```
-
-This applies to ordinary assignments, not hash rockets (`=>`) or comparison operators.
-
----
-
-## `--[no-]align-assignments-sequential`
-
-Aligns consecutive variable assignments.
-
-Example input:
-
-```puppet
-$minute = undef
-$hour = undef
-$destination = 'nfs'
-```
-
-With assignment alignment:
+Sequential assignment alignment can produce:
 
 ```puppet
 $minute      = undef
@@ -403,275 +465,58 @@ $hour        = undef
 $destination = 'nfs'
 ```
 
-Disable with:
+---
+
+# Comments
+
+Standalone comment indentation can be controlled independently from normal source indentation.
+
+For example:
 
 ```bash
-puppet-format-4sp --no-align-assignments-sequential manifest.pp
+puppet-format --no-align-comments manifest.pp
 ```
 
-If you do not want parameter/variable declarations visually padded to the longest variable name, keep this disabled.
+preserves the original leading indentation of standalone comment lines instead of passing them through the indentation rewrite.
+
+This is useful when comments have intentionally chosen visual positioning.
+
+Trailing-whitespace cleanup is separate from comment indentation, so trailing spaces may still be removed from an otherwise preserved comment line.
 
 ---
 
-## `--[no-]split-empty-resource-body`
+# Empty resource bodies
 
-Controls how an empty resource body is written.
+The formatter can normalize empty resource bodies consistently.
 
-This option makes these two inputs behave consistently:
+Compact form:
 
 ```puppet
 class {
-    'opensearch::templates':;
+    'example':;
 }
 ```
 
-and:
+Split form:
 
 ```puppet
 class {
-    'opensearch::templates': ;
-}
-```
-
-### Split mode
-
-With splitting enabled:
-
-```puppet
-class {
-    'opensearch::templates':
+    'example':
         ;
 }
 ```
 
-### Compact mode
-
-With splitting disabled:
-
-```puppet
-class {
-    'opensearch::templates':;
-}
-```
-
-The formatter distinguishes this from a resource that has actual parameters:
-
-```puppet
-file {
-    '/tmp/example':
-        ensure => file;
-}
-```
-
-For a title followed by `;` on the next line, the terminator is kept at resource-parameter depth:
-
-```puppet
-class {
-    'opensearch::policies':
-        ;
-}
-```
-
----
-
-# Resource declaration formatting
-
-Resource layout is normalized independently of rocket alignment.
-
-## Inline resource title
-
-Input:
-
-```puppet
-file { $payload_dir:
-    ensure => directory,
-}
-```
-
-Output:
-
-```puppet
-file {
-    $payload_dir:
-        ensure => directory,
-}
-```
-
-The resource title is always moved to the line after the opening brace.
-
----
-
-## Inline resource parameters
-
-Input:
-
-```puppet
-file { $payload_file: ensure => file, mode => '0640', owner => 'root',
-}
-```
-
-Output:
-
-```puppet
-file {
-    $payload_file:
-        ensure => file,
-        mode   => '0640',
-        owner  => 'root',
-}
-```
-
-Only top-level resource parameter separators are split. Commas inside nested expressions are not treated as resource parameter separators.
-
-For example:
-
-```puppet
-file {
-    '/tmp/example':
-        content => template($a, $b),
-        options => ['one', 'two'],
-}
-```
-
-The commas inside `template(...)` and `[...]` are not mistaken for resource parameter boundaries.
-
----
-
-## Resource-like `class { ... }`
-
-The formatter recognizes resource-style class declarations:
-
-```puppet
-class {
-    'zabbix_monitoring::opensearch':
-        server_host => 'localhost';
-}
-```
-
-This is different from a normal class definition:
-
-```puppet
-class example {
-    ...
-}
-```
-
-The former receives resource-title/resource-parameter indentation; the latter is treated as ordinary Puppet structure.
-
----
-
-## Namespaced defined resources
-
-Namespaced resource types are also recognized:
-
-```puppet
-opensearch::indexes::rollover_bootstrap {
-    $alias:
-        index_prefix => $index_prefix;
-}
-```
-
----
-
-# Arrays and hashes
-
-Current formatting preserves already-multiline array/hash layout unless a dedicated collection-layout option is implemented/enabled.
-
-For example:
-
-```puppet
-discovery_nodes => [
-    'node1',
-    'node2',
-    'node3',
-],
-```
-
-is structurally indented, but its elements are not arbitrarily collapsed into one line.
-
-## Planned collection-layout modes
-
-A useful future interface is:
+The behavior is controlled by:
 
 ```text
---array-layout preserve|compact|split
---hash-layout preserve|compact|split
+--[no-]split-empty-resource-body
 ```
-
-Recommended defaults:
-
-```text
-array-layout = preserve
-hash-layout  = preserve
-```
-
-Suggested semantics:
-
-### `preserve`
-
-Keep existing collection line breaks.
-
-```puppet
-$array = [one, two,
-    three,
-]
-```
-
-remains structurally equivalent, apart from normal indentation/spacing passes.
-
-### `compact`
-
-Normalize the collection toward compact one-line form when it is safe to do so.
-
-Example:
-
-```puppet
-$array = [ one,   two, three ]
-```
-
-becomes:
-
-```puppet
-$array = [one, two, three]
-```
-
-### `split`
-
-Put every top-level collection entry on its own line.
-
-Example:
-
-```puppet
-$array = [one, two, three, four]
-```
-
-becomes:
-
-```puppet
-$array = [
-    one,
-    two,
-    three,
-    four,
-]
-```
-
-Nested commas must not be split at the outer collection level:
-
-```puppet
-$data = {
-    'one' => func($a, $b),
-    'two' => [1, 2, 3],
-}
-```
-
-> **Note:** This section describes the planned configurable collection-layout behavior. Remove the "Planned" label once these options are present in the CLI.
 
 ---
 
 # Multiline strings and heredocs
 
-The formatter protects multiline string content from indentation and trailing-whitespace rewrites.
+The formatter protects multiline strings and heredoc content from structural indentation and trailing-whitespace transformations where whitespace may be semantically significant.
 
 Example:
 
@@ -682,244 +527,98 @@ line three
 '
 ```
 
-The physical lines inside the string are not re-indented.
+The physical lines inside the string are not arbitrarily re-indented.
 
-Interpolated double-quoted multiline strings are also protected, including lexer sequences such as `DQPRE`, `DQMID`, and `DQPOST`.
-
-Heredoc content is likewise treated as protected content.
-
-This is important because whitespace inside a heredoc or multiline string may be semantically significant.
-
----
-
-# Trailing whitespace
-
-Trailing spaces and tabs are removed from ordinary Puppet source lines.
-
-Example:
-
-```puppet
-discovery_nodes => [    
-```
-
-becomes:
-
-```puppet
-discovery_nodes => [
-```
-
-Likewise:
-
-```puppet
-}    
-```
-
-becomes:
-
-```puppet
-}
-```
-
-Trailing whitespace is **not removed inside protected heredocs or multiline strings**.
-
-A useful verification command is:
-
-```bash
-git diff --check
-```
-
----
-
-# Resource relationships
-
-Relationship operators such as:
-
-```puppet
-->
-~>
-```
-
-are preserved rather than aligned or rewritten as hash rockets.
-
-Example:
-
-```puppet
-file {
-    '/tmp/a':
-        ensure => file;
-}
--> service {
-    'example':
-        ensure => running;
-}
-```
-
-The formatter may normalize the leading indentation of the relationship line, but does not treat `->` or `~>` as `=>`.
-
----
-
-# Formatting pipeline
-
-The formatter follows a staged approach:
-
-1. Validate the original Puppet source.
-2. Lex the original source with `puppet-lint`.
-3. Normalize resource layout.
-4. Re-lex after any inserted/removed line breaks.
-5. Calculate structural nesting depth.
-6. Calculate extra resource-parameter depth.
-7. Detect protected heredoc/multiline-string lines.
-8. Detect relationship lines.
-9. Rewrite indentation.
-10. Normalize hash rockets, if enabled.
-11. Align sequential hash rockets, if enabled.
-12. Align hash rockets by indentation/block, if enabled.
-13. Normalize assignments, if enabled.
-14. Align sequential assignments, if enabled.
-15. Re-lex the final result.
-16. Recalculate protected multiline lines.
-17. Remove trailing whitespace outside protected content.
-18. Validate the formatted Puppet source.
-
-Re-lexing after passes that change physical line numbers is important because lexer token `line` and `column` information must match the current source.
+Interpolated multiline double-quoted strings are also protected using lexer token information.
 
 ---
 
 # UTF-8 safety
 
-Source edits are applied using byte offsets.
+Source edits use byte offsets rather than Ruby character indexes.
 
-This is important for manifests containing non-ASCII text, for example:
+This matters when manifests contain multibyte UTF-8 text before a token being edited, for example:
 
 ```puppet
 String $script_path, # скрипт для выполнения API call
 ```
 
-Ruby character indexes and lexer byte-oriented positions can diverge after UTF-8 multibyte characters.
-
-The formatter therefore performs offset-based source edits on a binary copy of the string and restores the original encoding afterwards.
+The formatter applies offset-based edits to a binary copy of the source and restores the original encoding afterward.
 
 ---
 
-# Recommended defaults
+# Formatting pipeline
 
-A practical configuration is:
+The formatter uses staged transformations so token line and column information always corresponds to the current source text.
 
-```ruby
-check: false,
-diff: false,
-indent_width: 4,
+A simplified pipeline is:
 
-normalize_rockets: true,
-align_rockets_sequential: false,
-align_rockets_by_indent: false,
-align_rockets_oneline: false,
+1. Validate the original Puppet source.
+2. Lex the source with `puppet-lint`.
+3. Normalize resource layout.
+4. Re-lex.
+5. Normalize `if` / `elsif` / `else` layout.
+6. Re-lex.
+7. Normalize `->` / `~>` relationship layout, if enabled.
+8. Re-lex.
+9. Calculate structural, resource, comment, protected-line, and relationship metadata.
+10. Rewrite indentation.
+11. Normalize and/or align hash rockets, if enabled.
+12. Normalize and/or align assignments, if enabled.
+13. Re-lex the final result.
+14. Remove trailing whitespace outside protected multiline content.
+15. Validate the formatted Puppet source.
 
-normalize_assignments: false,
-align_assignments_sequential: false,
-
-split_empty_resource_body: true,
-```
-
-If/when collection-layout options are enabled:
-
-```ruby
-array_layout: :preserve,
-hash_layout: :preserve,
-```
+Re-lexing after transformations that change physical line breaks is important because lexer `line` and `column` positions must match the current source.
 
 ---
 
-# Example configurations
+# CI example
 
-## Minimal formatting
-
-Normalize indentation and basic rocket spacing, but avoid visual alignment:
+A typical CI check is:
 
 ```bash
-puppet-format-4sp \
-  --normalize-rockets \
-  --no-align-rockets-sequential \
-  --no-align-rockets-by-indent \
-  --no-align-assignments-sequential \
-  manifest.pp
+puppet-format --check --diff .
 ```
 
-## More aggressive alignment
+Useful additional validation:
 
 ```bash
-puppet-format-4sp \
-  --normalize-rockets \
-  --align-rockets-sequential \
-  --align-assignments-sequential \
-  manifest.pp
+git diff --check
 ```
 
-## CI check
+To inspect invisible whitespace:
 
 ```bash
-puppet-format-4sp \
-  --check \
-  --diff \
-  manifest.pp
+sed -n '1,160p' manifest.pp | cat -A
 ```
 
 ---
 
 # Design goals
 
-`puppet-format-4sp` intentionally separates formatting concerns:
+`puppet-format` intentionally keeps formatting concerns separate:
 
 - structural indentation
+- conditional layout
 - resource layout
+- relationship normalization
 - hash-rocket normalization
 - hash-rocket alignment
 - assignment normalization
 - assignment alignment
+- comment indentation
 - protected multiline content
 - trailing-whitespace cleanup
 
-This makes it possible to enable alignment without changing unrelated syntax, or normalize spacing without forcing every construct into one visual style.
-
-The formatter also favors lexer-aware transformations over raw text splitting so that commas, braces, quotes, and interpolation inside nested expressions are less likely to be misinterpreted.
-
----
-
-# Development / debugging
-
-Useful token dump:
-
-```ruby
-tokens.each do |token|
-  puts "#{token.type} line=#{token.line} column=#{token.column} value=#{token.value.inspect}"
-end
-```
-
-`puppet-lint` token columns are 1-based, so an absolute byte offset can be calculated as:
-
-```ruby
-line_start_offset + token.column - 1
-```
-
-When debugging formatting differences:
-
-```bash
-puppet-format-4sp --check --diff manifest.pp
-git diff --check
-```
-
-To make invisible whitespace visible:
-
-```bash
-sed -n '1,120p' manifest.pp | cat -A
-```
+The implementation prefers lexer-aware transformations over direct regular-expression parsing wherever possible. This reduces the risk of misinterpreting braces, commas, operators, comments, interpolation, or strings inside nested Puppet expressions.
 
 ---
 
 # License
 
-`puppet-format-4sp` is distributed under the BSD 2-Clause License.
+`puppet-format` is distributed under the BSD 2-Clause License.
 
-See [LICENSE](LICENSE) for the full license text.
+See `LICENSE` for the full license text.
 
-SPDX-License-Identifier: BSD 2-Clause "Simplified" License
+SPDX-License-Identifier: BSD-2-Clause
