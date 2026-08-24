@@ -1,50 +1,173 @@
 # frozen_string_literal: true
 # SPDX-License-Identifier: BSD-2-Clause
 
-require 'open3'
-
 module PuppetFormat4sp
   # Adds the require paths of a gem installed for a different Ruby executable.
   # This is primarily useful when the formatter runs under Puppet's embedded
   # Ruby while puppet-lint is installed for the system Ruby.
+
   module DependencyLoader
-    DEFAULT_SYSTEM_RUBY = '/usr/bin/ruby'
+    class DependencyLoadError < LoadError
+    end
+
+    #
+    # These paths are used ONLY when the normal system require fails.
+    #
+    # Globs are allowed.
+    #
+    FALLBACKS = {
+      'puppet' => [
+        '/opt/puppetlabs/puppet/lib/ruby/vendor_ruby',
+        '/opt/puppetlabs/puppet/lib/ruby/vendor_gems/gems/puppet-*/lib',
+      ],
+
+      'puppet-lint' => [
+        '/opt/puppetlabs/puppet/lib/ruby/vendor_ruby',
+        '/opt/puppetlabs/puppet/lib/ruby/vendor_gems/gems/puppet-lint-*/lib',
+      ],
+    }.freeze
 
     module_function
 
-    def add_system_gem_require_paths(name, ruby: ENV.fetch('PUPPET_FORMAT_SYSTEM_RUBY', DEFAULT_SYSTEM_RUBY))
-      script = <<~'RUBY'
-        require 'rubygems'
-        Gem::Specification.find_by_name(ARGV.fetch(0)).full_require_paths.each { |path| puts path }
-      RUBY
+    #
+    # Load all requested dependencies.
+    #
+    # Pass 1:
+    #   Try everything using the normal system Ruby environment.
+    #
+    # Pass 2:
+    #   For dependencies that failed, append only their configured
+    #   Puppet Labs fallback paths and retry them.
+    #
+    def load_all(*names)
+      failures = {}
 
-      output, status = Open3.capture2(ruby, '-e', script, name)
-      return false unless status.success?
+      names.each do |name|
+        error = try_require(name)
+        failures[name] = error if error
+      end
 
-      output.each_line do |line|
-        path = line.strip
-        next if path.empty? || $LOAD_PATH.include?(path)
+      failures.each do |name, system_error|
+        fallback_paths = add_fallback_paths(name)
 
-        $LOAD_PATH.unshift(path)
+        fallback_error = try_require(name)
+        next unless fallback_error
+
+        raise_dependency_error(
+          name,
+          system_error,
+          fallback_error,
+          fallback_paths
+        )
       end
 
       true
-    rescue Errno::ENOENT
-      false
+    end
+
+    #
+    # Try require and return:
+    #
+    #   nil       on success
+    #   LoadError on failure
+    #
+    def try_require(name)
+      require name
+      nil
+    rescue LoadError => error
+      error
+    end
+
+    #
+    # Add fallback paths for one particular dependency.
+    #
+    # IMPORTANT:
+    #
+    # We append to $LOAD_PATH instead of prepending.
+    #
+    # This preserves the desired priority:
+    #
+    #   system libraries
+    #       first
+    #
+    #   Puppet Labs fallback
+    #       second
+    #
+    def add_fallback_paths(name)
+      configured_paths =
+        FALLBACKS.fetch(name, [])
+
+      paths =
+        configured_paths
+          .flat_map { |path| expand_path(path) }
+          .select { |path| File.directory?(path) }
+          .uniq
+
+      paths.each do |path|
+        next if $LOAD_PATH.include?(path)
+
+        $LOAD_PATH << path
+      end
+
+      paths
+    end
+
+    #
+    # Support both literal paths and paths containing glob patterns.
+    #
+    def expand_path(path)
+      if glob_path?(path)
+        Dir.glob(path).sort
+      else
+        [path]
+      end
+    end
+
+    def glob_path?(path)
+      path.include?('*') ||
+        path.include?('?') ||
+        path.include?('[')
+    end
+
+    def raise_dependency_error(
+      name,
+      system_error,
+      fallback_error,
+      fallback_paths
+    )
+      paths =
+        if fallback_paths.empty?
+          '  (no existing fallback paths found)'
+        else
+          fallback_paths
+            .map { |path| "  #{path}" }
+            .join("\n")
+        end
+
+      message = <<~TEXT
+        Unable to load required dependency: #{name}
+
+        System require failed:
+          #{system_error.class}: #{system_error.message}
+
+        Puppet Labs fallback paths:
+        #{paths}
+
+        Fallback require failed:
+          #{fallback_error.class}: #{fallback_error.message}
+      TEXT
+
+      raise DependencyLoadError, message
     end
   end
 end
 
-require 'puppet'
-
-begin
-  require 'puppet-lint'
-rescue LoadError
-  PuppetFormat4sp::DependencyLoader.add_system_gem_require_paths('puppet-lint')
-  require 'puppet-lint'
-end
+PuppetFormat4sp::DependencyLoader.load_all(
+  'puppet',
+  'puppet-lint'
+)
 
 module PuppetFormat4sp
+
   class FormatError < StandardError; end
 
   class Formatter
@@ -166,6 +289,7 @@ module PuppetFormat4sp
       @normalize_relationships = normalize_relationships
       @indent_reference_relationships = indent_reference_relationships
       @align_comments = align_comments
+
     end
 
     def format
