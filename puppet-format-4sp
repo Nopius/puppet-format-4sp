@@ -18,7 +18,7 @@ options = {
   align_assignments_sequential: true,
   split_empty_resource_body: true,
   normalize_relationships: true,
-  indent_reference_relationships: true,
+  indent_reference_relationships: false,
   align_comments: true
 }
 
