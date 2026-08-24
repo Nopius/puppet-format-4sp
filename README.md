@@ -922,4 +922,4 @@ sed -n '1,120p' manifest.pp | cat -A
 
 See [LICENSE](LICENSE) for the full license text.
 
-SPDX-License-Identifier: BSD-2-Clauseur repository here.
+SPDX-License-Identifier: BSD 2-Clause "Simplified" License
