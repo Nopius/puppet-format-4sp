@@ -273,7 +273,7 @@ module PuppetFormat4sp
       DQTEXT
     ].freeze
 
-    RESOURCE_TITLE_VALUE_TYPES = %i[
+    RESOURCE_TITLE_END_TYPES = %i[
       SSTRING
       STRING
       DSTRING
@@ -281,6 +281,7 @@ module PuppetFormat4sp
       VARIABLE
       NAME
       DEFAULT
+      RBRACK
     ].freeze
 
     RESOURCE_DECLARATION_NAME_TYPES = %i[
@@ -1037,7 +1038,7 @@ module PuppetFormat4sp
       return false unless frame[:type] == :LBRACE && frame[:resource]
 
       previous = index.positive? ? tokens[index - 1] : nil
-      previous && RESOURCE_TITLE_VALUE_TYPES.include?(previous.type)
+      previous && RESOURCE_TITLE_END_TYPES.include?(previous.type)
     end
 
     def directly_inside_resource?(stack)
