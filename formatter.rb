@@ -1,56 +1,70 @@
 # frozen_string_literal: true
 # SPDX-License-Identifier: BSD-2-Clause
 
-module PuppetFormat4sp
-  # Adds the require paths of a gem installed for a different Ruby executable.
-  # This is primarily useful when the formatter runs under Puppet's embedded
-  # Ruby while puppet-lint is installed for the system Ruby.
+# frozen_string_literal: true
 
+module PuppetFormat4sp
   module DependencyLoader
     class DependencyLoadError < LoadError
     end
 
-    #
-    # These paths are used ONLY when the normal system require fails.
-    #
-    # Globs are allowed.
-    #
+    PUPPET_ROOT =
+      '/opt/puppetlabs/puppet'.freeze
+
     FALLBACKS = {
       'puppet' => [
-        '/opt/puppetlabs/puppet/lib/ruby/vendor_ruby',
-        '/opt/puppetlabs/puppet/lib/ruby/vendor_gems/gems/puppet-*/lib',
+        "#{PUPPET_ROOT}/lib/ruby/vendor_ruby",
+
+        #
+        # Puppet has many transitive dependencies:
+        #
+        #   concurrent-ruby
+        #   hiera
+        #   semantic_puppet
+        #   puppet-resource_api
+        #   etc.
+        #
+        # Add all Puppet AIO vendor gems, but only after
+        # the normal system require has failed.
+        #
+        "#{PUPPET_ROOT}/lib/ruby/vendor_gems/gems/*/lib",
       ],
 
       'puppet-lint' => [
-        '/opt/puppetlabs/puppet/lib/ruby/vendor_ruby',
-        '/opt/puppetlabs/puppet/lib/ruby/vendor_gems/gems/puppet-lint-*/lib',
+        "#{PUPPET_ROOT}/lib/ruby/vendor_ruby",
+        "#{PUPPET_ROOT}/lib/ruby/vendor_gems/gems/*/lib",
       ],
     }.freeze
 
     module_function
 
-    #
-    # Load all requested dependencies.
-    #
-    # Pass 1:
-    #   Try everything using the normal system Ruby environment.
-    #
-    # Pass 2:
-    #   For dependencies that failed, append only their configured
-    #   Puppet Labs fallback paths and retry them.
-    #
     def load_all(*names)
       failures = {}
 
+      #
+      # PASS 1
+      #
+      # Try every dependency using only the normal
+      # system Ruby environment.
+      #
       names.each do |name|
         error = try_require(name)
         failures[name] = error if error
       end
 
+      #
+      # PASS 2
+      #
+      # Only dependencies which failed above get
+      # their Puppet Labs fallback paths.
+      #
       failures.each do |name, system_error|
-        fallback_paths = add_fallback_paths(name)
+        fallback_paths =
+          add_fallback_paths(name)
 
-        fallback_error = try_require(name)
+        fallback_error =
+          try_require(name)
+
         next unless fallback_error
 
         raise_dependency_error(
@@ -64,12 +78,6 @@ module PuppetFormat4sp
       true
     end
 
-    #
-    # Try require and return:
-    #
-    #   nil       on success
-    #   LoadError on failure
-    #
     def try_require(name)
       require name
       nil
@@ -77,21 +85,6 @@ module PuppetFormat4sp
       error
     end
 
-    #
-    # Add fallback paths for one particular dependency.
-    #
-    # IMPORTANT:
-    #
-    # We append to $LOAD_PATH instead of prepending.
-    #
-    # This preserves the desired priority:
-    #
-    #   system libraries
-    #       first
-    #
-    #   Puppet Labs fallback
-    #       second
-    #
     def add_fallback_paths(name)
       configured_paths =
         FALLBACKS.fetch(name, [])
@@ -105,15 +98,20 @@ module PuppetFormat4sp
       paths.each do |path|
         next if $LOAD_PATH.include?(path)
 
+        #
+        # Important:
+        #
+        # append rather than prepend.
+        #
+        # Existing system Ruby paths therefore
+        # retain priority.
+        #
         $LOAD_PATH << path
       end
 
       paths
     end
 
-    #
-    # Support both literal paths and paths containing glob patterns.
-    #
     def expand_path(path)
       if glob_path?(path)
         Dir.glob(path).sort
