@@ -19,6 +19,7 @@ It formats resource declarations, hash rockets, assignments, comments, condition
 - Optional hash-rocket (`=>`) normalization and alignment
 - Optional variable-assignment (`=`) normalization and alignment
 - Optional comment indentation control
+- Configurable normalization/alignment of multiline array elements
 - Configurable handling of empty resource bodies
 - Preserves heredocs and multiline quoted strings
 - Removes trailing whitespace outside protected multiline content
@@ -89,6 +90,7 @@ The exact defaults are defined by the command-line wrapper, but the formatter su
 --[no-]indent-reference-relationships
 
 --[no-]align-comments
+--[no-]align-array-elements
 
 --check
 --diff
@@ -366,6 +368,111 @@ file {
 }
 ```
 
+## Array resource titles
+
+Arrays can be used as resource titles. With array-element alignment enabled, a multiline resource-title array is normalized so the opening bracket, elements, closing bracket, and resource parameters have predictable indentation.
+
+Input:
+
+```puppet
+package {
+    [ "docker-compose-multiversion-1.29.2",
+      "docker-compose-multiversion-1.29.2-cli",
+      "docker-compose-multiversion-1.29.2-plugin" ]:
+            ensure => absent,
+}
+```
+
+Output:
+
+```puppet
+package {
+    [
+        "docker-compose-multiversion-1.29.2",
+        "docker-compose-multiversion-1.29.2-cli",
+        "docker-compose-multiversion-1.29.2-plugin"
+    ]:
+        ensure => absent,
+}
+```
+
+The resource parameters are indented at the same level as the array elements. The `]:` line remains at resource-title depth.
+
+Comments belonging to the resource parameters follow the same parameter depth:
+
+```puppet
+package {
+    [
+        'docker-a',
+        'docker-b',
+        'docker-c',
+    ]:
+        # remove packages only if ensure is set
+        # otherwise leave them untouched
+        ensure => absent,
+}
+```
+
+---
+
+# Array element alignment
+
+The option:
+
+```text
+--[no-]align-array-elements
+```
+
+controls normalization of elements in multiline arrays.
+
+With array-element alignment enabled, top-level elements of an already multiline array are placed on separate lines and indented one structural level inside `[` and `]`.
+
+Input:
+
+```puppet
+$packages = [ 'one',
+              'two',
+              'three' ]
+```
+
+Output:
+
+```puppet
+$packages = [
+    'one',
+    'two',
+    'three'
+]
+```
+
+The formatter normalizes line placement and indentation; it does not add or remove element commas. Existing trailing commas are preserved.
+
+The formatter only treats top-level commas as array-element separators. Commas inside nested expressions are not split at the outer array level. For example:
+
+```puppet
+$values = [
+    template($a, $b),
+    { 'one' => 1, 'two' => 2 },
+    ['nested-a', 'nested-b'],
+]
+```
+
+A compact one-line array remains compact unless another formatting rule changes it:
+
+```puppet
+$values = ['one', 'two', 'three']
+```
+
+Disable multiline-array element normalization with:
+
+```bash
+puppet-format --no-align-array-elements manifest.pp
+```
+
+This option controls array layout/alignment; arrays still participate in ordinary structural indentation.
+
+---
+
 ## Resource-style class declarations
 
 The formatter recognizes resource-style class declarations:
@@ -555,19 +662,21 @@ A simplified pipeline is:
 
 1. Validate the original Puppet source.
 2. Lex the source with `puppet-lint`.
-3. Normalize resource layout.
+3. Normalize multiline array-element layout, if enabled.
 4. Re-lex.
-5. Normalize `if` / `elsif` / `else` layout.
+5. Normalize resource layout.
 6. Re-lex.
-7. Normalize `->` / `~>` relationship layout, if enabled.
+7. Normalize `if` / `elsif` / `else` layout.
 8. Re-lex.
-9. Calculate structural, resource, comment, protected-line, and relationship metadata.
-10. Rewrite indentation.
-11. Normalize and/or align hash rockets, if enabled.
-12. Normalize and/or align assignments, if enabled.
-13. Re-lex the final result.
-14. Remove trailing whitespace outside protected multiline content.
-15. Validate the formatted Puppet source.
+9. Normalize `->` / `~>` relationship layout, if enabled.
+10. Re-lex.
+11. Calculate structural, resource, comment, protected-line, and relationship metadata.
+12. Rewrite indentation.
+13. Normalize and/or align hash rockets, if enabled.
+14. Normalize and/or align assignments, if enabled.
+15. Re-lex the final result.
+16. Remove trailing whitespace outside protected multiline content.
+17. Validate the formatted Puppet source.
 
 Re-lexing after transformations that change physical line breaks is important because lexer `line` and `column` positions must match the current source.
 
@@ -608,6 +717,7 @@ sed -n '1,160p' manifest.pp | cat -A
 - assignment normalization
 - assignment alignment
 - comment indentation
+- multiline array-element layout
 - protected multiline content
 - trailing-whitespace cleanup
 
