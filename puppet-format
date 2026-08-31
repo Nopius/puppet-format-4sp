@@ -363,7 +363,7 @@ module PuppetFormat4sp
       indent_reference_relationships: true,
       align_comments: true,
       align_array_elements: true,
-      align_one_line_collections: true
+      split_one_line_collections: false
     )
       raise ArgumentError, 'indent_width must be greater than zero' unless indent_width.positive?
 
@@ -381,7 +381,7 @@ module PuppetFormat4sp
       @indent_reference_relationships = indent_reference_relationships
       @align_comments = align_comments
       @align_array_elements = align_array_elements
-      @align_one_line_collections = align_one_line_collections
+      @split_one_line_collections = split_one_line_collections
 
     end
 
@@ -2224,10 +2224,10 @@ end
 
 opts.on(
   '--[no-]split-one-line-collections',
-  'Split one-line arrays or hashes literals into separate lines',
+  'Split one-line array and hash literals into separate lines',
   '(default: disabled)'
 ) do |value|
-  options[:align_array_elements] = value
+  options[:split_one_line_collections] = value
 end
 
   opts.separator ''
@@ -2374,7 +2374,7 @@ files.each do |path|
       indent_reference_relationships: options[:indent_reference_relationships],
       align_array_elements: options[:align_array_elements],
       align_comments: options[:align_comments],
-      align_one_line_collections: options[:align_one_lign_collections],
+      split_one_line_collections: options[:split_one_line_collections],
 
     )
     formatted = formatter.format
