@@ -321,6 +321,30 @@ module PuppetFormat4sp
       ELSE
     ].freeze
 
+    BRACKET_RECEIVER_TYPES = %i[
+      VARIABLE
+      NAME
+      TYPE
+      CLASSREF
+    
+      SSTRING
+      STRING
+      DSTRING
+      DQPOST
+    
+      INTEGER
+      FLOAT
+      NUMBER
+    
+      TRUE
+      FALSE
+      UNDEF
+    
+      RPAREN
+      RBRACK
+      RBRACE
+    ].freeze
+    
     HASH_ROCKET_TYPE = :FARROW
     ASSIGNMENT_TYPE = :EQUALS
 
@@ -338,7 +362,8 @@ module PuppetFormat4sp
       normalize_relationships: true,
       indent_reference_relationships: true,
       align_comments: true,
-      align_array_elements: true
+      align_array_elements: true,
+      align_one_line_collections: true
     )
       raise ArgumentError, 'indent_width must be greater than zero' unless indent_width.positive?
 
@@ -356,6 +381,7 @@ module PuppetFormat4sp
       @indent_reference_relationships = indent_reference_relationships
       @align_comments = align_comments
       @align_array_elements = align_array_elements
+      @align_one_line_collections = align_one_line_collections
 
     end
 
@@ -365,14 +391,17 @@ module PuppetFormat4sp
       current = @source
       tokens = lex(current)
 
-      if @align_array_elements
-        current = normalize_multiline_array_layout(
+      if @align_array_elements ||
+         @split_one_line_collections
+      
+        current = normalize_collection_layout(
           current,
           tokens
         )
+      
         tokens = lex(current)
       end
-
+      
       current = normalize_resource_layout(current, tokens)
       tokens = lex(current)
 
@@ -540,24 +569,36 @@ module PuppetFormat4sp
       end
     end
 
-    def calculate_array_pairs(significant)
+
+    def calculate_delimiter_pairs(significant)
       pairs = {}
       stack = []
     
       significant.each_with_index do |token, index|
-        case token.type
-        when :LBRACK
-          stack << index
+        if OPEN_TO_CLOSE.key?(token.type)
+          stack << [
+            token.type,
+            index,
+          ]
     
-        when :RBRACK
-          opening = stack.pop
-          pairs[opening] = index if opening
+          next
         end
+    
+        next unless CLOSE_TO_OPEN.key?(token.type)
+    
+        opening_type, opening_index = stack.pop
+    
+        next unless opening_index
+    
+        #
+        # Source has already been Puppet-validated, so properly
+        # nested delimiters are expected here.
+        #
+        pairs[opening_index] = index
       end
     
       pairs
     end
-
 
     def token_index_by_identity(tokens)
       tokens.each_with_index.to_h { |token, index| [token.object_id, index] }
@@ -739,126 +780,6 @@ module PuppetFormat4sp
     
       depths
     end
-
-    def normalize_multiline_array_layout(text, tokens)
-      significant = significant_tokens(tokens)
-      return text if significant.empty?
-    
-      pairs = calculate_array_pairs(significant)
-      return text if pairs.empty?
-    
-      token_indexes = token_index_by_identity(tokens)
-      line_offsets = line_start_offsets(text)
-      newline = preferred_newline(text)
-      edits = []
-    
-      pairs.each do |open_index, close_index|
-        opening = significant[open_index]
-        closing = significant[close_index]
-    
-        #
-        # Do not expand compact one-line arrays.
-        #
-        next if opening.line == closing.line
-    
-        #
-        # [
-        #     first,
-        #
-        # instead of:
-        #
-        # [ first,
-        #
-        if open_index + 1 < close_index
-          first_element = significant[open_index + 1]
-    
-          replace_inline_token_gap!(
-            edits,
-            tokens,
-            token_indexes,
-            opening,
-            first_element,
-            line_offsets,
-            newline,
-            allow_adjacent: true
-          )
-        end
-    
-        #
-        # Put top-level array elements on separate lines.
-        #
-        # Nested commas such as:
-        #
-        #   func($a, $b)
-        #   { 'a' => 1, 'b' => 2 }
-        #   ['a', 'b']
-        #
-        # are deliberately ignored.
-        #
-        nested_depth = 0
-    
-        ((open_index + 1)...close_index).each do |index|
-          token = significant[index]
-    
-          if OPEN_TO_CLOSE.key?(token.type)
-            nested_depth += 1
-            next
-          end
-    
-          if CLOSE_TO_OPEN.key?(token.type)
-            nested_depth -= 1 if nested_depth.positive?
-            next
-          end
-    
-          next unless token.type == :COMMA
-          next unless nested_depth.zero?
-    
-          next_token = significant[index + 1]
-    
-          next unless next_token
-          next unless index + 1 < close_index
-    
-          replace_inline_token_gap!(
-            edits,
-            tokens,
-            token_indexes,
-            token,
-            next_token,
-            line_offsets,
-            newline,
-            allow_adjacent: true
-          )
-        end
-    
-        #
-        # Last element
-        # ]
-        #
-        # instead of:
-        #
-        # last_element ]
-        #
-        previous = significant[close_index - 1]
-    
-        if previous &&
-           !previous.equal?(opening)
-    
-          replace_inline_token_gap!(
-            edits,
-            tokens,
-            token_indexes,
-            previous,
-            closing,
-            line_offsets,
-            newline,
-            allow_adjacent: true
-          )
-        end
-      end
-    
-      apply_source_edits(text, edits)
-    end
-
 
     def normalize_conditional_layout(text, tokens)
       significant = significant_tokens(tokens)
@@ -1053,6 +974,170 @@ module PuppetFormat4sp
       target_offset = token_offset(tokens[target_index], line_offsets)
 
       edits << [relationship_end, target_offset, ' ']
+    end
+
+    def normalize_collection_layout(text, tokens)
+      significant = significant_tokens(tokens)
+    
+      return text if significant.empty?
+    
+      pairs =
+        calculate_delimiter_pairs(significant)
+    
+      return text if pairs.empty?
+    
+      token_indexes =
+        token_index_by_identity(tokens)
+    
+      line_offsets =
+        line_start_offsets(text)
+    
+      newline =
+        preferred_newline(text)
+    
+      edits = []
+    
+      pairs.each do |open_index, close_index|
+        opening = significant[open_index]
+        closing = significant[close_index]
+    
+        kind =
+          collection_kind(
+            significant,
+            open_index,
+            close_index
+          )
+    
+        next unless kind
+    
+        #
+        # Keep empty collections compact:
+        #
+        #   []
+        #   {}
+        #
+        next if close_index == open_index + 1
+    
+        one_line =
+          opening.line == closing.line
+    
+        case kind
+        when :array
+          if one_line
+            next unless @split_one_line_collections
+          else
+            next unless @align_array_elements
+          end
+    
+        when :hash
+          #
+          # For now we only normalize hashes when explicitly
+          # expanding a one-line collection.
+          #
+          # Existing multiline hash layout remains untouched.
+          #
+          next unless one_line
+          next unless @split_one_line_collections
+        end
+    
+        first_element =
+          significant[open_index + 1]
+    
+        #
+        #     [ first,
+        #
+        # becomes:
+        #
+        #     [
+        #         first,
+        #
+        # and similarly for {.
+        #
+        replace_inline_token_gap!(
+          edits,
+          tokens,
+          token_indexes,
+          opening,
+          first_element,
+          line_offsets,
+          newline,
+          allow_adjacent: true
+        )
+    
+        #
+        # Split top-level collection entries.
+        #
+        # Nested commas are ignored:
+        #
+        #   func($a, $b)
+        #   ['a', 'b']
+        #   { 'a' => 1, 'b' => 2 }
+        #
+        nested_depth = 0
+    
+        ((open_index + 1)...close_index).each do |index|
+          token = significant[index]
+    
+          if OPEN_TO_CLOSE.key?(token.type)
+            nested_depth += 1
+            next
+          end
+    
+          if CLOSE_TO_OPEN.key?(token.type)
+            nested_depth -= 1 if nested_depth.positive?
+            next
+          end
+    
+          next unless token.type == :COMMA
+          next unless nested_depth.zero?
+    
+          next_token =
+            significant[index + 1]
+    
+          next unless next_token
+    
+          #
+          # Trailing comma immediately before ] or }.
+          # Closing delimiter is handled below.
+          #
+          next unless index + 1 < close_index
+    
+          replace_inline_token_gap!(
+            edits,
+            tokens,
+            token_indexes,
+            token,
+            next_token,
+            line_offsets,
+            newline,
+            allow_adjacent: true
+          )
+        end
+    
+        #
+        #     last ]
+        #
+        # becomes:
+        #
+        #     last
+        # ]
+        #
+        previous =
+          significant[close_index - 1]
+    
+        replace_inline_token_gap!(
+          edits,
+          tokens,
+          token_indexes,
+          previous,
+          closing,
+          line_offsets,
+          newline,
+          allow_adjacent: true
+        )
+      end
+    
+      apply_source_edits(text, edits)
     end
 
     # Resource layout
@@ -1672,6 +1757,128 @@ module PuppetFormat4sp
         significant[(index + 1)..].any? { |token| token.type == :RBRACE }
     end
 
+    def array_literal_opening?(tokens, index)
+      token = tokens[index]
+    
+      return false unless token
+      return false unless token.type == :LBRACK
+    
+      return true if index.zero?
+    
+      previous = tokens[index - 1]
+    
+      return false if BRACKET_RECEIVER_TYPES.include?(
+        previous.type
+      )
+    
+      true
+    end
+
+    def top_level_hash_rocket?(
+      significant,
+      open_index,
+      close_index
+    )
+      depth = 0
+    
+      ((open_index + 1)...close_index).each do |index|
+        token = significant[index]
+    
+        if OPEN_TO_CLOSE.key?(token.type)
+          depth += 1
+          next
+        end
+    
+        if CLOSE_TO_OPEN.key?(token.type)
+          depth -= 1 if depth.positive?
+          next
+        end
+    
+        if token.type == :FARROW &&
+           depth.zero?
+          return true
+        end
+      end
+    
+      false
+    end
+
+    def hash_literal_opening?(
+      significant,
+      open_index,
+      close_index
+    )
+      opening = significant[open_index]
+    
+      return false unless opening.type == :LBRACE
+    
+      #
+      # Resource declaration:
+      #
+      #   file {
+      #       ...
+      #   }
+      #
+      return false if resource_opening_brace?(
+        significant,
+        open_index
+      )
+    
+      previous =
+        open_index.positive? ?
+          significant[open_index - 1] :
+          nil
+    
+      #
+      # Puppet selector:
+      #
+      #   $value ? {
+      #       'one'   => 1,
+      #       default => 2,
+      #   }
+      #
+      # This is not a Hash literal.
+      #
+      if previous &&
+         token_source(previous) == '?'
+        return false
+      end
+    
+      #
+      # Actual hashes have a top-level =>.
+      #
+      top_level_hash_rocket?(
+        significant,
+        open_index,
+        close_index
+      )
+    end
+
+    def collection_kind(
+      significant,
+      open_index,
+      close_index
+    )
+      opening = significant[open_index]
+    
+      case opening.type
+      when :LBRACK
+        return :array if array_literal_opening?(
+          significant,
+          open_index
+        )
+    
+      when :LBRACE
+        return :hash if hash_literal_opening?(
+          significant,
+          open_index,
+          close_index
+        )
+      end
+    
+      nil
+    end
+
     def sequential_operator_groups(entries)
       groups = []
       current = []
@@ -1870,7 +2077,8 @@ options = {
   normalize_relationships: true,
   indent_reference_relationships: false,
   align_comments: true,
-  align_array_elements: true
+  align_array_elements: true,
+  split_one_line_collections: false
 }
 
 parser = OptionParser.new do |opts|
@@ -1938,7 +2146,6 @@ parser = OptionParser.new do |opts|
   opts.on(
     '--[no-]align-rockets-sequential',
     'Align => operators in consecutive same-indent entries',
-    '(default: enabled'
   ) do |value|
     options[:align_rockets_sequential] = value
   end
@@ -1990,6 +2197,7 @@ parser = OptionParser.new do |opts|
   'Normalize -> and ~> relationship layout'
 ) do |value|
   options[:normalize_relationships] = value
+
 end
 
 opts.on(
@@ -2010,6 +2218,14 @@ end
 opts.on(
   '--[no-]align-array-elements',
   'Align elements of multiline arrays'
+) do |value|
+  options[:align_array_elements] = value
+end
+
+opts.on(
+  '--[no-]split-one-line-collections',
+  'Split one-line arrays or hashes literals into separate lines',
+  '(default: disabled)'
 ) do |value|
   options[:align_array_elements] = value
 end
@@ -2156,7 +2372,10 @@ files.each do |path|
 
       normalize_relationships: options[:normalize_relationships],
       indent_reference_relationships: options[:indent_reference_relationships],
-      align_comments: options[:align_comments]
+      align_array_elements: options[:align_array_elements],
+      align_comments: options[:align_comments],
+      align_one_line_collections: options[:align_one_lign_collections],
+
     )
     formatted = formatter.format
 
