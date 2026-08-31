@@ -1031,12 +1031,13 @@ module PuppetFormat4sp
     
         when :hash
           #
-          # For now we only normalize hashes when explicitly
-          # expanding a one-line collection.
+          # When collection splitting is enabled, normalize the
+          # whole hash even if it is already partly multiline.
+          # This removes partially-inline layouts such as:
           #
-          # Existing multiline hash layout remains untouched.
+          #   { a => 1, b => 2,
+          #     c => { d => 3 } }
           #
-          next unless one_line
           next unless @split_one_line_collections
         end
     
