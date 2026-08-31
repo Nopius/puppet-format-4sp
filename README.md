@@ -20,6 +20,7 @@ It formats resource declarations, hash rockets, assignments, comments, condition
 - Optional variable-assignment (`=`) normalization and alignment
 - Optional comment indentation control
 - Configurable normalization/alignment of multiline array elements
+- Optional expansion and normalization of array and hash literals with `--split-one-line-collections`
 - Configurable handling of empty resource bodies
 - Preserves heredocs and multiline quoted strings
 - Removes trailing whitespace outside protected multiline content
@@ -74,7 +75,7 @@ puppet-format --check --diff manifests/
 The exact defaults are defined by the command-line wrapper, but the formatter supports the following formatting controls:
 
 ```text
---indent-width N
+--indent N
 
 --[no-]normalize-rockets
 --[no-]align-rockets-sequential
@@ -91,6 +92,7 @@ The exact defaults are defined by the command-line wrapper, but the formatter su
 
 --[no-]align-comments
 --[no-]align-array-elements
+--[no-]split-one-line-collections
 
 --check
 --diff
@@ -457,7 +459,7 @@ $values = [
 ]
 ```
 
-A compact one-line array remains compact unless another formatting rule changes it:
+A compact one-line array remains compact unless `--split-one-line-collections` is enabled or another formatting rule changes it:
 
 ```puppet
 $values = ['one', 'two', 'three']
@@ -470,6 +472,90 @@ puppet-format --no-align-array-elements manifest.pp
 ```
 
 This option controls array layout/alignment; arrays still participate in ordinary structural indentation.
+
+---
+
+# One-line collection splitting
+
+The option:
+
+```text
+--[no-]split-one-line-collections
+```
+
+is disabled by default. When enabled, it expands compact array and hash literals into multiline form.
+
+For arrays:
+
+```puppet
+$values = [1, 2, 3]
+```
+
+becomes:
+
+```puppet
+$values = [
+    1,
+    2,
+    3
+]
+```
+
+For hashes:
+
+```puppet
+$settings = { 'host' => 'localhost', 'port' => 9200 }
+```
+
+becomes:
+
+```puppet
+$settings = {
+    'host' => 'localhost',
+    'port' => 9200
+}
+```
+
+When this option is enabled, a hash that is already partly multiline is normalized as a complete multiline hash so that each top-level entry is placed on its own line. For example:
+
+```puppet
+$settings = { 'host' => 'localhost', 'port' => 9200,
+    'tls' => { 'enabled' => true } }
+```
+
+becomes:
+
+```puppet
+$settings = {
+    'host' => 'localhost',
+    'port' => 9200,
+    'tls' => {
+        'enabled' => true
+    }
+}
+```
+
+Nested collections are handled structurally. Only commas at the current collection level are treated as element separators, so commas inside nested arrays, hashes, and function calls are not mistaken for separators in the outer collection.
+
+Empty collections remain compact:
+
+```puppet
+$empty_array = []
+$empty_hash = {}
+```
+
+Bracket syntax that is not an array literal is not expanded. For example, resource references, access expressions, and type expressions remain unchanged:
+
+```puppet
+File['/tmp/example']
+$array[0]
+$hash['key']
+Array[String]
+```
+
+Likewise, braces belonging to resource declarations or conditional blocks are not treated as hash literals.
+
+`--split-one-line-collections` changes collection layout only. Assignment spacing is controlled separately by `--normalize-assignments`, and hash-rocket spacing/alignment is controlled by the hash-rocket options.
 
 ---
 
@@ -662,7 +748,7 @@ A simplified pipeline is:
 
 1. Validate the original Puppet source.
 2. Lex the source with `puppet-lint`.
-3. Normalize multiline array-element layout, if enabled.
+3. Normalize collection layout: multiline arrays when array alignment is enabled, and array/hash literals when one-line collection splitting is enabled.
 4. Re-lex.
 5. Normalize resource layout.
 6. Re-lex.
@@ -718,6 +804,7 @@ sed -n '1,160p' manifest.pp | cat -A
 - assignment alignment
 - comment indentation
 - multiline array-element layout
+- array/hash collection splitting and normalization
 - protected multiline content
 - trailing-whitespace cleanup
 

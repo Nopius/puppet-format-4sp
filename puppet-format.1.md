@@ -24,8 +24,9 @@ It is intended for Puppet 8 code, uses 4-space indentation by default, and
 uses `puppet-lint` lexer tokens instead of regular-expression parsing wherever
 practical.
 
-The formatter handles resource declarations, multiline arrays, hash rockets,
-assignments, comments, conditional blocks, and Puppet relationship operators
+The formatter handles resource declarations, array and hash collection layout,
+hash rockets, assignments, comments, conditional blocks, and Puppet relationship
+operators
 while protecting multiline strings and heredocs from unsafe rewrites.
 
 When a directory is specified, Puppet files below that directory are
@@ -33,7 +34,7 @@ formatted.
 
 # OPTIONS
 
-**--indent-width** *N*
+**--indent** *N*
 : Set the number of spaces used for one indentation level. The normal default
   is 4.
 
@@ -80,6 +81,11 @@ formatted.
 : Enable or disable normalization of elements in multiline arrays. When
   enabled, top-level elements are placed on separate lines and indented one
   structural level inside the array.
+
+**--[no-]split-one-line-collections**
+: Expand one-line array and hash literals into multiline form. This option is
+  disabled by default. When enabled, partially multiline hash literals are also
+  normalized so each top-level hash entry is placed on its own line.
 
 **--check**
 : Check whether formatting changes are required instead of silently accepting
@@ -190,8 +196,8 @@ $packages = [
 ]
 ```
 
-Compact one-line arrays remain compact unless another formatting rule changes
-them:
+Compact one-line arrays remain compact unless **--split-one-line-collections**
+is enabled or another formatting rule changes them:
 
 ```puppet
 $values = ['one', 'two', 'three']
@@ -245,6 +251,65 @@ package {
 The resource parameters and comments belonging to them are indented at the
 same level as the array elements. The `]:` line remains at resource-title
 depth.
+
+# COLLECTION SPLITTING
+
+**--split-one-line-collections** is disabled by default. When enabled, compact
+array and hash literals are expanded into multiline form.
+
+For example:
+
+```puppet
+$values = [1, 2, 3]
+$settings = { 'host' => 'localhost', 'port' => 9200 }
+```
+
+becomes:
+
+```puppet
+$values = [
+    1,
+    2,
+    3
+]
+
+$settings = {
+    'host' => 'localhost',
+    'port' => 9200
+}
+```
+
+A hash that is already partly multiline is also normalized while this option is
+enabled. For example:
+
+```puppet
+$settings = { 'host' => 'localhost', 'port' => 9200,
+    'tls' => { 'enabled' => true } }
+```
+
+becomes:
+
+```puppet
+$settings = {
+    'host' => 'localhost',
+    'port' => 9200,
+    'tls' => {
+        'enabled' => true
+    }
+}
+```
+
+Only separators at the current collection level are split. Commas inside nested
+arrays, hashes, and function calls do not act as separators for the outer
+collection. Empty arrays and hashes remain compact.
+
+Bracket expressions that are not array literals, such as `File['/tmp/example']`,
+`$array[0]`, `$hash['key']`, and `Array[String]`, are not expanded. Resource and
+conditional braces are not treated as hash literals.
+
+Collection splitting changes collection layout only. Assignment spacing remains
+controlled by **--normalize-assignments**, while hash-rocket spacing and
+alignment remain controlled by the hash-rocket options.
 
 # RESOURCE RELATIONSHIPS
 
@@ -467,6 +532,12 @@ Disable multiline-array normalization:
 
 ```sh
 puppet-format --no-align-array-elements manifest.pp
+```
+
+Expand one-line array and hash literals:
+
+```sh
+puppet-format --split-one-line-collections manifest.pp
 ```
 
 Disable relationship normalization:
