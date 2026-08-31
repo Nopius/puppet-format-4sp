@@ -1,4 +1,4 @@
-Name:           puppet-format                                                                                                                                                                                                                                          [3/46246]
+Name:           puppet-format
 Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Puppet source code formatter
@@ -46,22 +46,21 @@ install -Dpm 0644 \
 %doc %{_docdir}/%{name}/README.md
 
 %changelog
-* Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-1
-- Initial package
-
-* Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-2
-- script name fixed in --help: puppet-format-4sp -> puppet-format
-- removed extra # with duplicated ruby options
-
-* Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-3
-- .spec file fixed: changelog added
+* Mon Aug 31 2026 Nopius <nopius@nopius.com> - 1.1.0-1
+- added option --split-one-line-collections (split one-line array/hash into many lines)
+- updated manuals for the new option
 
 * Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-4
 - added option --[no-]align-array-elements for multiline arrays
 - added man page puppet-format.1
 - changed SOURCE to .tar.gz
 
-* Mon Aug 31 2026 Nopius <nopius@nopius.com> - 1.1.0-1
-- added option --split-one-line-collections (split one-line array/hash into many lines)
-- updated manuals for the new option
+* Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-3
+- .spec file fixed: changelog added
 
+* Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-2
+- script name fixed in --help: puppet-format-4sp -> puppet-format
+- removed extra # with duplicated ruby options
+
+* Mon Aug 24 2026 Nopius <nopius@nopius.com> - 1.0.0-1
+- Initial package
